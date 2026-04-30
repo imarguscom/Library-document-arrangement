@@ -1,6 +1,17 @@
-import pandas as pd
+import customtkinter as ctk
+import tkinter.filedialog as filedialog
+import threading
 import sys
+import pandas as pd
+import requests
+import urllib.parse
+import xml.etree.ElementTree as ET
 import re
+from time import sleep
+
+# ================= 配置区域 =================
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
 
 TARGET_COLUMNS = [
     "题名", "其他题名", "作者", "第一作者单位", "通讯作者单位", "发表日期", "发表期刊",
@@ -16,24 +27,14 @@ TARGET_COLUMNS = [
 
 DEFAULT_DATE_SUFFIX = "-01-01"
 
-
 LANG_MAP = {
-    "english": "英语",
-    "chinese": "中文",
-    "german": "德语",
-    "french": "法语",
-    "spanish": "西班牙语",
-    "japanese": "日语",
-    "russian": "俄语",
-    "korean": "韩语",
-    "italian": "意大利语",
-    "portuguese": "葡萄牙语",
-    "polish": "波兰语",
-    "dutch": "荷兰语",
-    "arabic": "阿拉伯语"
+    "english": "英语", "chinese": "中文", "german": "德语", "french": "法语",
+    "spanish": "西班牙语", "japanese": "日语", "russian": "俄语", "korean": "韩语",
+    "italian": "意大利语", "portuguese": "葡萄牙语", "polish": "波兰语",
+    "dutch": "荷兰语", "arabic": "阿拉伯语"
 }
 
-# ================= 工具函数 =================
+# ================= 数据清洗核心逻辑 =================
 
 def normalize_doi(doi):
     if pd.isna(doi):
@@ -53,7 +54,6 @@ def clean_name_keep_full(name_str):
     return re.sub(r"\s*\(\d+\)", "", str(name_str)).strip()
 
 def normalize_date(d1, d2=""):
-    """将各种日期统一为 YYYY-MM-DD"""
     s = f"{d1} {d2}".strip()
     if not s or s.lower() in ['nan', 'none', '']:
         return ""
@@ -63,14 +63,12 @@ def normalize_date(d1, d2=""):
             return dt.strftime("%Y-%m-%d")
     except Exception:
         pass
-    
     m = re.search(r'(19\d{2}|20\d{2})', s)
     if m:
         return f"{m.group(1)}-01-01"
     return ""
 
 def translate_language(lang_str):
-    """标准化语种为中文"""
     if not lang_str or pd.isna(lang_str):
         return ""
     s = str(lang_str).strip().lower()
@@ -98,7 +96,6 @@ def match_author_affiliations(auth_entry, aff_dict, master_aff_list):
     return sorted(list(set(indices)))
 
 def safe_get(row, keys):
-    """尝试从 row 中获取 keys 列表中第一个存在且非空的值，支持列名大小写不敏感匹配"""
     for k in keys:
         if k in row.index:
             val = row[k]
@@ -110,8 +107,6 @@ def safe_get(row, keys):
                 if pd.notna(val) and str(val).strip().lower() not in ['nan', '']:
                     return str(val).strip()
     return ""
-
-
 
 def process_scopus_row(row):
     aff_str = safe_get(row, ["Affiliations", "Affiliation", "机构", "单位", "作者单位", "归属机构"])
@@ -139,7 +134,6 @@ def process_scopus_row(row):
         else:
             formatted_authors.append(name)
 
-   
     first_author_name = full_names[0] if full_names else ""
     first_author_affs = ""
 
@@ -158,7 +152,6 @@ def process_scopus_row(row):
         if len(parts) > 1:
             first_author_affs = parts[1].strip()
 
-    # 提取通讯作者全名及单位
     corr_str = safe_get(row, ["Correspondence Address", "通讯地址", "通信地址", "通讯作者地址", "联系地址"])
     corr_author_name = ""
     corr_author_affs = ""
@@ -167,7 +160,7 @@ def process_scopus_row(row):
         parts = str(corr_str).split(";")
         if parts:
             corr_author_short = parts[0].strip()
-            corr_author_name = corr_author_short 
+            corr_author_name = corr_author_short  
             
             if corr_author_short and full_names:
                 short_last = corr_author_short.split(",")[0].strip().lower()
@@ -235,8 +228,6 @@ def process_scopus_row(row):
         "来源库": "SCOPUS",
     }
 
-
-# WOS 处理逻
 def process_wos_row(row):
     doi = normalize_doi(safe_get(row, ["DOI", "DI"]))
     pub_date = safe_get(row, ["Publication Date", "PD"])
@@ -307,7 +298,6 @@ def process_wos_row(row):
         if addresses:
             first_author_aff = addresses.split(';')[0].strip()
 
-    # 提取通讯作者全名及单位
     rp_address = safe_get(row, ["Reprint Addresses", "RP", "通讯地址"])
     corr_author = ""
     corr_author_aff = ""
@@ -322,7 +312,6 @@ def process_wos_row(row):
                 if corr_author_aff.startswith(","):
                     corr_author_aff = corr_author_aff[1:].strip()
                 
-                # 匹配全名
                 corr_author = corr_author_short
                 if corr_author_short and af_list:
                     short_last = corr_author_short.split(",")[0].strip().lower()
@@ -369,8 +358,6 @@ def process_wos_row(row):
 
     return record
 
-
-#  EI 
 def process_ei_row(row):
     doi = normalize_doi(safe_get(row, ["DOI"]))
 
@@ -383,9 +370,23 @@ def process_ei_row(row):
     lang_raw = safe_get(row, ["Language"])
     lang = translate_language(lang_raw)
 
+    authors = safe_get(row, ["Author", "Author(s)", "Authors", "作者"])
+    first_author = ""
+    if authors:
+        first_author = authors.split(";")[0].strip()
+
+    affiliations = safe_get(row, ["Author affiliation", "Author Affiliation", "Affiliation", "作者单位", "机构"])
+    first_author_aff = ""
+    if affiliations:
+        first_author_aff = affiliations.split(";")[0].strip()
+
     return {
         "DOI": doi,
         "题名": safe_get(row, ["Title"]),
+        "作者": authors,
+        "第一作者": first_author,
+        "作者单位": affiliations,
+        "第一作者单位": first_author_aff,
         "发表期刊": safe_get(row, ["Source"]),
         "ISSN": safe_get(row, ["ISSN"]),
         "EISSN": safe_get(row, ["E-ISSN"]),
@@ -403,8 +404,6 @@ def process_ei_row(row):
         "来源库": "EI",
     }
 
-
-# 合并
 def merge_records(existing, new_data):
     for key, val in new_data.items():
         if key == "DOI":
@@ -433,8 +432,6 @@ def merge_records(existing, new_data):
 
     return existing
 
-
-# 文件读取
 def read_ei_csv_robust(file_path):
     try:
         return pd.read_csv(file_path, sep=",", engine="python", dtype=str, encoding="utf-8-sig", quotechar='"', escapechar="\\", doublequote=True)
@@ -456,86 +453,249 @@ def read_normal_csv_robust(file_path):
     except Exception:
         return pd.read_csv(file_path, sep=sep, engine="python", dtype=str, encoding='utf-8-sig', on_bad_lines="skip")
 
+# ================= 文章查询 API =================
 
-def main(files, output_file):
-    merged_db = {}
+def fetch_xml(doi: str, eid: str, api_key: str) -> str:
+    doi = (doi or "").strip()
+    eid = (eid or "").strip()
 
-    print(f"准备处理 {len(files)} 个文件...")
+    if doi:
+        url = f"https://api.elsevier.com/content/abstract/doi/{urllib.parse.quote(doi)}"
+    elif eid:
+        url = f"https://api.elsevier.com/content/abstract/eid/{urllib.parse.quote(eid)}"
+    else:
+        return ""
 
-    for file_path in files:
+    headers = {
+        "X-ELS-APIKey": api_key,
+        "Accept": "application/xml"
+    }
+    params = {"view": "FULL"}
+
+    resp = requests.get(url, headers=headers, params=params, timeout=20)
+    if resp.status_code == 404:
+        return ""
+    resp.raise_for_status()
+    return resp.text
+
+def parse_subjects(xml_text: str):
+    if not xml_text:
+        return "", ""
+
+    ns = {"ab": "http://www.elsevier.com/xml/svapi/abstract/dtd"}
+    root = ET.fromstring(xml_text)
+
+    subject_areas = []
+    for sa in root.findall(".//ab:subject-areas/ab:subject-area", ns):
+        code = sa.attrib.get("code")
+        name = (sa.text or "").strip()
+        if code or name:
+            subject_areas.append((code, name))
+
+    if not subject_areas:
+        return "", ""
+
+    names_str = "; ".join(name for code, name in subject_areas if name)
+    codes_str = "; ".join(code for code, name in subject_areas if code)
+    return names_str, codes_str
+
+# ================= UI 界面 =================
+
+class RedirectText:
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+    def write(self, string):
+        self.text_widget.insert(ctk.END, string)
+        self.text_widget.see(ctk.END)
+    def flush(self): pass
+
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("文献数据处理工具")
+        self.geometry("750x650")
+        self.input_files = []
+
+        self.api_label = ctk.CTkLabel(self, text="Scopus API Key:", font=("Arial", 14, "bold"))
+        self.api_label.grid(row=0, column=0, padx=20, pady=(20, 0), sticky="w")
+        self.api_entry = ctk.CTkEntry(self, width=400, placeholder_text="若为空，则仅合并文件跳过文章查询")
+        self.api_entry.insert(0, "0c04fccbb9e77bce241b397054c99792")
+        self.api_entry.grid(row=0, column=1, padx=20, pady=(20, 0), sticky="w")
+
+        self.in_label = ctk.CTkLabel(self, text="选择原始数据:", font=("Arial", 14, "bold"))
+        self.in_label.grid(row=1, column=0, padx=20, pady=(15, 0), sticky="w")
+        self.in_entry = ctk.CTkEntry(self, width=400, placeholder_text="支持多选 CSV/Excel/TXT")
+        self.in_entry.grid(row=1, column=1, padx=20, pady=(15, 0), sticky="w")
+        self.in_btn = ctk.CTkButton(self, text="浏览多文件...", width=90, command=self.browse_inputs)
+        self.in_btn.grid(row=1, column=2, padx=10, pady=(15, 0))
+
+        self.out_label = ctk.CTkLabel(self, text="保存最终结果:", font=("Arial", 14, "bold"))
+        self.out_label.grid(row=2, column=0, padx=20, pady=(15, 0), sticky="w")
+        self.out_entry = ctk.CTkEntry(self, width=400)
+        self.out_entry.grid(row=2, column=1, padx=20, pady=(15, 0), sticky="w")
+        self.out_btn = ctk.CTkButton(self, text="选择保存...", width=90, command=self.browse_output)
+        self.out_btn.grid(row=2, column=2, padx=10, pady=(15, 0))
+
+        self.run_btn = ctk.CTkButton(self, text="开始运行", font=("Arial", 16, "bold"), command=self.start_processing)
+        self.run_btn.grid(row=3, column=0, columnspan=3, pady=(25, 10))
+
+        self.log_box = ctk.CTkTextbox(self, width=700, height=300, font=("Consolas", 12))
+        self.log_box.grid(row=4, column=0, columnspan=3, padx=20, pady=(10, 20))
+        sys.stdout = RedirectText(self.log_box)
+
+    def browse_inputs(self):
+        filepaths = filedialog.askopenfilenames(filetypes=[("Data files", "*.xlsx *.xls *.csv *.txt")])
+        if filepaths:
+            self.input_files = list(filepaths)
+            self.in_entry.delete(0, ctk.END)
+            self.in_entry.insert(0, f"已选中 {len(filepaths)} 个文件")
+
+    def browse_output(self):
+        filepath = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
+        if filepath:
+            self.out_entry.delete(0, ctk.END)
+            self.out_entry.insert(0, filepath)
+
+    def start_processing(self):
+        self.run_btn.configure(state="disabled", text="运行中...")
+        self.log_box.delete("0.0", ctk.END)
+        api_key = self.api_entry.get().strip()
+        out_file = self.out_entry.get().strip()
+
+        if not self.input_files or not out_file:
+            print("错误：请确保已选择输入文件并设置保存位置。")
+            self.run_btn.configure(state="normal", text="开始运行")
+            return
+
+        threading.Thread(target=self.run_pipeline, args=(api_key, self.input_files, out_file)).start()
+
+    def run_pipeline(self, api_key, input_files, out_file):
         try:
-            print(f"正在读取: {file_path}")
-
-            if file_path.endswith(".csv"):
-                is_ei_csv = False
+            print("================ 第一阶段：合并与清洗 ================")
+            merged_db = {}
+            for file_path in input_files:
+                print(f"正在读取: {file_path}")
                 try:
-                    with open(file_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
-                        header_line = f.readline().lower()
-                        if "accession number" in header_line or "compendex" in header_line:
-                            is_ei_csv = True
-                except Exception:
-                    pass
+                    if file_path.endswith(".csv"):
+                        is_ei_csv = False
+                        try:
+                            with open(file_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
+                                header_line = f.readline().lower()
+                                if "accession number" in header_line or "compendex" in header_line:
+                                    is_ei_csv = True
+                        except Exception:
+                            pass
 
-                if is_ei_csv:
-                    df = read_ei_csv_robust(file_path)
-                else:
-                    df = read_normal_csv_robust(file_path)
-            
-            elif file_path.endswith(".xls") or file_path.endswith(".xlsx"):
-                df = pd.read_excel(file_path, dtype=str)
-            elif file_path.endswith(".txt"):
-                df = pd.read_csv(file_path, sep="\t", engine="python", dtype=str)
-            else:
-                print(f"跳过: {file_path}")
-                continue
-
-            df.columns = df.columns.str.strip().str.replace("\ufeff", "")
-
-            is_scopus = ("EID" in df.columns) or ("scopus" in str(file_path).lower()) or ("带归属机构的作者" in df.columns)
-            is_wos = ("UT (Unique WOS ID)" in df.columns) or ("Web of Science Record" in df.columns) or ("UT" in df.columns)
-            is_ei = ("Accession number" in df.columns or "Accession Number" in df.columns) and ("Classification code" in df.columns or "Classification Code" in df.columns)
-
-            if is_wos:
-                print("  [识别为 WOS]")
-            elif is_scopus:
-                print("  [识别为 SCOPUS]")
-            elif is_ei:
-                print("  [识别为 EI]")
-
-            for _, row in df.iterrows():
-                if is_scopus:
-                    record = process_scopus_row(row)
-                elif is_wos:
-                    record = process_wos_row(row)
-                elif is_ei:
-                    record = process_ei_row(row)
-                else:
-                    record = process_scopus_row(row)
-
-                doi = record.get("DOI")
-                if doi:
-                    if doi in merged_db:
-                        merged_db[doi] = merge_records(merged_db[doi], record)
+                        if is_ei_csv:
+                            df = read_ei_csv_robust(file_path)
+                        else:
+                            df = read_normal_csv_robust(file_path)
+                    
+                    elif file_path.endswith(".xls") or file_path.endswith(".xlsx"):
+                        df = pd.read_excel(file_path, dtype=str)
+                    elif file_path.endswith(".txt"):
+                        df = pd.read_csv(file_path, sep="\t", engine="python", dtype=str)
                     else:
-                        merged_db[doi] = record
+                        print(f"跳过: {file_path}")
+                        continue
+
+                    df.columns = df.columns.str.strip().str.replace("\ufeff", "")
+
+                    is_scopus = ("EID" in df.columns) or ("scopus" in str(file_path).lower()) or ("带归属机构的作者" in df.columns)
+                    is_wos = ("UT (Unique WOS ID)" in df.columns) or ("Web of Science Record" in df.columns) or ("UT" in df.columns)
+                    is_ei = ("Accession number" in df.columns or "Accession Number" in df.columns) and ("Classification code" in df.columns or "Classification Code" in df.columns)
+
+                    if is_wos:
+                        print("  [识别为 WOS]")
+                    elif is_scopus:
+                        print("  [识别为 SCOPUS]")
+                    elif is_ei:
+                        print("  [识别为 EI]")
+
+                    for _, row in df.iterrows():
+                        if is_scopus:
+                            record = process_scopus_row(row)
+                        elif is_wos:
+                            record = process_wos_row(row)
+                        elif is_ei:
+                            record = process_ei_row(row)
+                        else:
+                            record = process_scopus_row(row)
+
+                        doi = record.get("DOI")
+                        if doi:
+                            if doi in merged_db:
+                                merged_db[doi] = merge_records(merged_db[doi], record)
+                            else:
+                                merged_db[doi] = record
+
+                except Exception as e:
+                    print(f"读取错误 {file_path}: {e}")
+
+            output_df = pd.DataFrame(list(merged_db.values()))
+            
+            for col in TARGET_COLUMNS:
+                if col not in output_df.columns:
+                    output_df[col] = ""
+                    
+            print(f"合并结束，共有 {len(output_df)} 条记录。")
+
+            print("\n================ 第二阶段：按文章补充学科信息 ================")
+            if not api_key:
+                print("API Key为空，跳过该步骤。")
+                df_merged = output_df
+            else:
+                df_raw = output_df.copy()
+                
+                if "DOI" not in df_raw.columns: df_raw["DOI"] = ""
+                if "SCOPUSEID" not in df_raw.columns: df_raw["SCOPUSEID"] = ""
+                
+                df_raw["DOI"] = df_raw["DOI"].fillna("").str.strip()
+                df_raw["SCOPUSEID"] = df_raw["SCOPUSEID"].fillna("").str.strip()
+
+                tasks = df_raw[["DOI", "SCOPUSEID"]].drop_duplicates()
+                tasks = tasks[(tasks["DOI"] != "") | (tasks["SCOPUSEID"] != "")]
+
+                records = []
+                total = len(tasks)
+                print(f"发现 {total} 条文章记录，开始查询...")
+
+                for i, (doi, eid) in enumerate(tasks.values, start=1):
+                    print(f"[{i}/{total}] DOI={doi} | EID={eid} ... ", end="")
+                    try:
+                        xml_text = fetch_xml(doi, eid, api_key)
+                        names_str, codes_str = parse_subjects(xml_text)
+                        if names_str or codes_str:
+                            print("OK")
+                        else:
+                            print("无学科信息")
+                    except Exception as e:
+                        print("出错:", e)
+                        names_str, codes_str = "", ""
+
+                    records.append({
+                        "DOI": doi,
+                        "SCOPUSEID": eid,
+                        "Scopus学科分类": names_str
+                    })
+                    sleep(0.2)
+
+                if records:
+                    df_sub = pd.DataFrame(records)
+                    df_merged = df_raw.drop(columns=["Scopus学科分类"], errors="ignore").merge(df_sub, how="left", on=["DOI", "SCOPUSEID"])
+                else:
+                    df_merged = df_raw
+
+            print("\n================ 第三阶段：保存文件 ================")
+            df_final = df_merged[TARGET_COLUMNS]
+            df_final.to_excel(out_file, index=False)
+            print(f"完成，已保存至：\n{out_file}")
 
         except Exception as e:
-            print(f"读取错误 {file_path}: {e}")
-
-    output_df = pd.DataFrame(list(merged_db.values()))
-
-    for col in TARGET_COLUMNS:
-        if col not in output_df.columns:
-            output_df[col] = ""
-
-    output_df = output_df[TARGET_COLUMNS]
-    output_df.to_excel(output_file, index=False)
-    print(f"完成！已保存到 {output_file}")
-
+            print(f"\n严重错误: {e}")
+        finally:
+            self.run_btn.configure(state="normal", text="开始运行")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python3 converter.py result.xlsx input1 input2 ...")
-        sys.exit(1)
-
-    main(sys.argv[2:], sys.argv[1])
+    app = App()
+    app.mainloop()

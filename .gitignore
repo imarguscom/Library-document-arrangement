@@ -27,3 +27,9 @@ env/
 .idea/
 *.swp
 *.swo
+.venv/
+__pycache__/
+build/
+dist/
+*.spec
+*.exe
