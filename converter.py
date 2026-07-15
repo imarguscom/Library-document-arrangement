@@ -1,6 +1,19 @@
 import pandas as pd
 import sys
 import re
+import urllib.parse
+import xml.etree.ElementTree as ET
+from time import sleep
+
+import requests
+
+from claim_mapping import build_publication_name_to_email, normalize_name
+from scope_rules import (
+    SCOPE_COLUMNS,
+    apply_scope_fields,
+    build_scholar_alias_registry,
+    write_multi_sheet_excel,
+)
 
 TARGET_COLUMNS = [
     "题名", "其他题名", "作者", "第一作者单位", "通讯作者单位", "发表日期", "发表期刊",
@@ -14,7 +27,11 @@ TARGET_COLUMNS = [
     "5年平均影响因子", "所属专题", "发文作者类型"
 ]
 
+CLAIM_COLUMN = "作品认领"
+CLAIM_SOURCE_COLUMNS = [CLAIM_COLUMN, "已认领作者", "注册邮箱", "邮箱", "学者邮箱", "认领邮箱"]
+AUTHOR_TYPE_COLUMNS = ["发文作者类型", "作者类型"]
 DEFAULT_DATE_SUFFIX = "-01-01"
+EXCEL_CELL_CHAR_LIMIT = 32767
 
 
 LANG_MAP = {
@@ -79,14 +96,45 @@ def translate_language(lang_str):
             return chn
     return str(lang_str).strip()
 
+def normalize_wos_index(index_text):
+    text = str(index_text or "").strip()
+    if not text or text.lower() == "nan":
+        return ""
+    mappings = [
+        ("SCI-EXPANDED", "SCIE"),
+        ("SCIENCE CITATION INDEX EXPANDED", "SCIE"),
+        ("SOCIAL SCIENCES CITATION INDEX", "SSCI"),
+        ("ARTS & HUMANITIES CITATION INDEX", "A&HCI"),
+        ("ARTS AND HUMANITIES CITATION INDEX", "A&HCI"),
+        ("EMERGING SOURCES CITATION INDEX", "ESCI"),
+    ]
+    upper = text.upper()
+    values = []
+    for marker, normalized in mappings:
+        if marker in upper and normalized not in values:
+            values.append(normalized)
+    return "; ".join(values) if values else text
+
+def normalize_publication_status(status_text):
+    text = str(status_text or "").strip()
+    if not text or text.lower() == "nan":
+        return "已发表"
+    lower = text.lower()
+    online_markers = ["article in press", "in press", "online", "early access", "网络首发", "在线"]
+    if any(marker in lower for marker in online_markers):
+        return "在线发表"
+    return "已发表"
+
 def parse_scopus_affiliations(aff_str):
     if pd.isna(aff_str) or not str(aff_str).strip():
         return {}, []
     aff_list = [a.strip() for a in str(aff_str).split(";") if a.strip()]
     aff_dict = {}
     master_list = []
-    for idx, aff in enumerate(aff_list):
-        aff_dict[aff] = idx + 1
+    for aff in aff_list:
+        if aff in aff_dict:
+            continue
+        aff_dict[aff] = len(master_list) + 1
         master_list.append(aff)
     return aff_dict, master_list
 
@@ -96,6 +144,69 @@ def match_author_affiliations(auth_entry, aff_dict, master_aff_list):
         if aff_name in auth_entry:
             indices.append(aff_dict[aff_name])
     return sorted(list(set(indices)))
+
+def extract_scopus_affiliations_from_authors(auth_with_aff_str):
+    affiliations = []
+    for entry in split_semicolon_values(auth_with_aff_str):
+        parts = entry.split(",", 1)
+        if len(parts) < 2:
+            continue
+        aff = parts[1].strip()
+        if aff and aff not in affiliations:
+            affiliations.append(aff)
+    return affiliations
+
+def format_indexed_affiliations(affiliations):
+    clean_affiliations = []
+    for aff in affiliations:
+        aff = re.sub(r"^(?:\(\d+\)|\d+[\).])\s*", "", str(aff)).strip(" ;；")
+        if aff and aff not in clean_affiliations:
+            clean_affiliations.append(aff)
+    return "; ".join([f"({idx}) {aff}" for idx, aff in enumerate(clean_affiliations, start=1)])
+
+def match_full_author_name(short_name, full_names):
+    short_name = str(short_name or "").strip()
+    if not short_name:
+        return ""
+    short_last = short_name.split(",")[0].strip().lower()
+    for full_name in full_names:
+        full_last = str(full_name).split(",")[0].strip().lower()
+        if short_last == full_last or short_last in full_last or full_last in short_last:
+            return full_name
+    return short_name
+
+def parse_scopus_correspondence(corr_str, full_names):
+    if not corr_str:
+        return "", ""
+    segments = [part.strip() for part in str(corr_str).split(";") if part.strip()]
+    authors = []
+    affiliations = []
+    current_author = ""
+    current_affiliations = []
+
+    def flush_current():
+        if current_author:
+            author = match_full_author_name(current_author, full_names)
+            if author and author not in authors:
+                authors.append(author)
+            aff = "; ".join(current_affiliations).strip()
+            if aff and aff not in affiliations:
+                affiliations.append(aff)
+
+    for segment in segments:
+        if "email:" in segment.lower() or "@" in segment:
+            flush_current()
+            current_author = ""
+            current_affiliations = []
+            continue
+        if not current_author:
+            current_author = segment
+            current_affiliations = []
+        else:
+            current_affiliations.append(segment)
+
+    flush_current()
+    return "; ".join(authors), "; ".join(affiliations)
 
 def safe_get(row, keys):
     """尝试从 row 中获取 keys 列表中第一个存在且非空的值，支持列名大小写不敏感匹配"""
@@ -110,6 +221,129 @@ def safe_get(row, keys):
                 if pd.notna(val) and str(val).strip().lower() not in ['nan', '']:
                     return str(val).strip()
     return ""
+
+def split_semicolon_values(value):
+    if pd.isna(value):
+        return []
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return []
+    return [x.strip() for x in re.split(r"[;；]", text) if x.strip()]
+
+def count_authors(author_text):
+    authors = split_semicolon_values(author_text)
+    return len(authors)
+
+def author_names(author_text):
+    names = []
+    if pd.isna(author_text):
+        return names
+    author_text = str(author_text)[:EXCEL_CELL_CHAR_LIMIT]
+    for author in split_semicolon_values(author_text):
+        name = re.sub(r"\s*\([^)]*\)\s*$", "", author).strip()
+        if name:
+            names.append(name)
+    return names
+
+def is_local_author_type(value):
+    text = str(value).strip().lower()
+    if not text or text == "nan":
+        return None
+    non_local_words = ["非本校", "外单位", "校外", "外校", "unknown"]
+    if any(word in text for word in non_local_words):
+        return False
+    local_words = ["本校", "校内", "本单位", "本院", "本机构"]
+    if any(word in text for word in local_words):
+        return True
+    return None
+
+def first_nonempty(row_or_record, keys):
+    for key in keys:
+        if isinstance(row_or_record, dict):
+            val = row_or_record.get(key, "")
+        else:
+            val = safe_get(row_or_record, [key])
+        if pd.notna(val) and str(val).strip().lower() not in ["", "nan"]:
+            return str(val).strip()
+    return ""
+
+def copy_claim_inputs(record, row):
+    for col in [CLAIM_COLUMN, "已认领作者", "发文作者类型", "注册邮箱", "邮箱", "学者邮箱", "认领邮箱", "作者类型"]:
+        val = safe_get(row, [col])
+        if val and not record.get(col):
+            record[col] = val
+    return record
+
+def build_claim_value(record, publication_name_to_email=None):
+    existing_claim = first_nonempty(record, [CLAIM_COLUMN])
+    if existing_claim:
+        return existing_claim
+
+    names = author_names(record.get("作者", ""))
+    author_count = len(names)
+    if author_count == 0:
+        return ""
+
+    if publication_name_to_email:
+        result = []
+        for name in names:
+            email = publication_name_to_email.get(normalize_name(name), "")
+            result.append(email if email else "unknown")
+        return ";".join(result)
+
+    claim_values = split_semicolon_values(first_nonempty(record, CLAIM_SOURCE_COLUMNS[1:]))
+    author_types = split_semicolon_values(first_nonempty(record, AUTHOR_TYPE_COLUMNS))
+
+    if len(claim_values) == author_count and all("@" in value or value.lower() == "unknown" for value in claim_values):
+        return ";".join(claim_values)
+
+    if len(author_types) == author_count:
+        result = []
+        next_email_idx = 0
+        for idx, author_type in enumerate(author_types):
+            is_local = is_local_author_type(author_type)
+            if is_local:
+                email = ""
+                if idx < len(claim_values) and "@" in claim_values[idx]:
+                    email = claim_values[idx]
+                else:
+                    while next_email_idx < len(claim_values):
+                        candidate = claim_values[next_email_idx]
+                        next_email_idx += 1
+                        if "@" in candidate:
+                            email = candidate
+                            break
+                result.append(email if email else "unknown")
+            else:
+                result.append("unknown")
+        return ";".join(result)
+
+    if len(claim_values) == 1 and author_count == 1 and "@" in claim_values[0]:
+        return claim_values[0]
+
+    return ";".join(["unknown"] * author_count)
+
+def get_output_columns(is_external_achievement=False):
+    columns = TARGET_COLUMNS.copy()
+    for col in SCOPE_COLUMNS:
+        if col not in columns:
+            try:
+                insert_at = columns.index("题名") + 1 + SCOPE_COLUMNS.index(col)
+            except ValueError:
+                insert_at = len(columns)
+            columns.insert(insert_at, col)
+    if not is_external_achievement and CLAIM_COLUMN not in columns:
+        columns.append(CLAIM_COLUMN)
+    if not is_external_achievement:
+        return columns
+    if CLAIM_COLUMN in columns:
+        return columns
+    try:
+        insert_at = columns.index("已认领作者") + 1
+    except ValueError:
+        insert_at = len(columns)
+    columns.insert(insert_at, CLAIM_COLUMN)
+    return columns
 
 
 
@@ -127,6 +361,10 @@ def process_scopus_row(row):
 
     auth_with_aff_str = safe_get(row, ["Authors with affiliations", "作者(包含单位)", "作者(包含机构)", "Authors with Affiliations", "带归属机构的作者"])
     auth_entries = str(auth_with_aff_str).split(";") if auth_with_aff_str else []
+    if not master_aff_list and auth_with_aff_str:
+        master_aff_list = extract_scopus_affiliations_from_authors(auth_with_aff_str)
+        aff_dict = {aff: idx + 1 for idx, aff in enumerate(master_aff_list)}
+    formatted_affils = format_indexed_affiliations(master_aff_list)
 
     formatted_authors = []
     for i, name in enumerate(full_names):
@@ -158,39 +396,8 @@ def process_scopus_row(row):
         if len(parts) > 1:
             first_author_affs = parts[1].strip()
 
-    # 提取通讯作者全名及单位
     corr_str = safe_get(row, ["Correspondence Address", "通讯地址", "通信地址", "通讯作者地址", "联系地址"])
-    corr_author_name = ""
-    corr_author_affs = ""
-
-    if corr_str:
-        parts = str(corr_str).split(";")
-        if parts:
-            corr_author_short = parts[0].strip()
-            corr_author_name = corr_author_short 
-            
-            if corr_author_short and full_names:
-                short_last = corr_author_short.split(",")[0].strip().lower()
-                for fn in full_names:
-                    fn_last = fn.split(",")[0].strip().lower()
-                    if short_last == fn_last or short_last in fn_last or fn_last in short_last:
-                        corr_author_name = fn
-                        break
-        
-        aff_parts = []
-        for p in parts[1:]:
-            if "email:" in p.lower() or "@" in p:
-                continue
-            aff_parts.append(p.strip())
-        
-        corr_author_affs = "; ".join(aff_parts)
-        
-        if not corr_author_affs:
-            c_clean = re.sub(r'(?i)email:.*', '', str(corr_str)).strip(' ;')
-            short_name = parts[0].strip() if parts else ""
-            if c_clean.startswith(short_name) and len(c_clean) > len(short_name):
-                c_clean = c_clean[len(short_name):].strip(' ,;')
-            corr_author_affs = c_clean
+    corr_author_name, corr_author_affs = parse_scopus_correspondence(corr_str, full_names)
 
     date_val = normalize_date(safe_get(row, ["Year", "年份", "日期"]))
     lang_raw = safe_get(row, ["Language of Original Document", "文献原始语言", "语种", "原始文献语言"])
@@ -223,13 +430,13 @@ def process_scopus_row(row):
         "资助项目": safe_get(row, ["Funding Details", "资助详细信息", "出资详情", "资金资助文本"]),
         "出版者": safe_get(row, ["Publisher", "出版商"]),
         "原始文献类型": safe_get(row, ["Document Type", "文献类型"]),
-        "发表状态": safe_get(row, ["Publication Stage", "出版阶段"]),
+        "发表状态": normalize_publication_status(safe_get(row, ["Publication Stage", "出版阶段"])),
         "参考文献": safe_get(row, ["References", "参考文献"]),
         "通讯作者": corr_author_name,
         "SCOPUS_ID": safe_get(row, ["EID"]),
         "SCOPUSEID": safe_get(row, ["EID"]),
         "页数": safe_get(row, ["Page count", "页数"]),
-        "作者单位": auth_with_aff_str if auth_with_aff_str else aff_str,
+        "作者单位": formatted_affils,
         "第一作者": first_author_name,
         "Scopus被引次数": safe_get(row, ["Cited by", "被引次数", "施引文献"]),
         "来源库": "SCOPUS",
@@ -240,14 +447,15 @@ def process_scopus_row(row):
 def process_wos_row(row):
     doi = normalize_doi(safe_get(row, ["DOI", "DI"]))
     pub_date = safe_get(row, ["Publication Date", "PD"])
-    pub_year = safe_get(row, ["Publication Year", "PY"])
+    pub_year = safe_get(row, ["Publication Year", "PY", "Year"])
     final_date = normalize_date(pub_date, pub_year)
 
     wos_cat = safe_get(row, ["WoS Categories", "Web of Science Categories", "WC", "Subject Category"])
+    wos_index = normalize_wos_index(safe_get(row, ["Web of Science Index", "WOS Index", "WoS Index", "Index"]))
 
-    authors_af = safe_get(row, ["Author Full Names", "AF", "作者(全名)", "作者全名"])
+    authors_af = safe_get(row, ["Authors", "AU", "Author Full Names", "AF", "作者(全名)", "作者全名"])
     if not authors_af:
-        authors_af = safe_get(row, ["Authors", "AU", "作者"])
+        authors_af = safe_get(row, ["作者"])
     
     af_list = [x.strip() for x in str(authors_af).split(';')] if authors_af else []
     first_author = af_list[0] if af_list else ""
@@ -337,6 +545,15 @@ def process_wos_row(row):
     lang_raw = safe_get(row, ["Language", "LA", "语种"])
     lang = translate_language(lang_raw)
 
+    page_value = safe_get(row, ["Pages", "PG", "Page"])
+    if not page_value:
+        start_page = safe_get(row, ["Start Page", "BP"])
+        end_page = safe_get(row, ["End Page", "EP"])
+        if start_page and end_page:
+            page_value = f"{start_page}-{end_page}"
+        else:
+            page_value = start_page or end_page
+
     record = {
         "DOI": doi,
         "WOS记录号": safe_get(row, ["UT (Unique WOS ID)", "UT", "Accession Number"]),
@@ -344,8 +561,9 @@ def process_wos_row(row):
         "WOS类目": wos_cat,
         "SCI被引次数": safe_get(row, ["Times Cited, All Databases", "TC"]),
         "影响因子": safe_get(row, ["Impact Factor", "IF", "Journal Impact Factor"]),
-        "收录类别": "SCIE",
+        "收录类别": wos_index or "SCIE",
         "来源库": "WOS",
+        "URL": "",
         "语种": lang,
         "发表日期": final_date,
         "作者": formatted_authors,
@@ -356,16 +574,19 @@ def process_wos_row(row):
         "作者单位": formatted_affils,
     }
 
-    record["题名"] = safe_get(row, ["Article Title", "TI"])
-    record["发表期刊"] = safe_get(row, ["Source Title", "SO"])
+    record["题名"] = safe_get(row, ["Article Title", "Title", "TI"])
+    record["发表期刊"] = safe_get(row, ["Source Title", "Journal", "SO"])
     record["ISSN"] = safe_get(row, ["ISSN", "SN"])
-    record["EISSN"] = safe_get(row, ["eISSN", "EI"])
+    record["EISSN"] = safe_get(row, ["eISSN", "EISSN", "EI"])
     record["卷号"] = safe_get(row, ["Volume", "VL"])
     record["期号"] = safe_get(row, ["Issue", "IS"])
-    record["页码"] = f"{safe_get(row, ['Start Page','BP'])}-{safe_get(row, ['End Page','EP'])}"
+    record["页码"] = page_value
     record["资助项目"] = safe_get(row, ["Funding Orgs", "FU"])
     record["出版者"] = safe_get(row, ["Publisher", "PU"])
     record["原始文献类型"] = safe_get(row, ["Document Type", "DT"])
+    record["发表状态"] = "在线发表" if safe_get(row, ["Early Access Date"]) else normalize_publication_status(
+        safe_get(row, ["Publication Status", "Publication Stage"])
+    )
 
     return record
 
@@ -382,10 +603,18 @@ def process_ei_row(row):
 
     lang_raw = safe_get(row, ["Language"])
     lang = translate_language(lang_raw)
+    authors = safe_get(row, ["Author", "Author(s)", "Authors", "作者"])
+    first_author = authors.split(";")[0].strip() if authors else ""
+    affiliations = safe_get(row, ["Author affiliation", "Author Affiliation", "Affiliation", "作者单位", "机构"])
+    first_author_aff = affiliations.split(";")[0].strip() if affiliations else ""
 
     return {
         "DOI": doi,
         "题名": safe_get(row, ["Title"]),
+        "作者": authors,
+        "第一作者": first_author,
+        "作者单位": affiliations,
+        "第一作者单位": first_author_aff,
         "发表期刊": safe_get(row, ["Source"]),
         "ISSN": safe_get(row, ["ISSN"]),
         "EISSN": safe_get(row, ["E-ISSN"]),
@@ -396,6 +625,7 @@ def process_ei_row(row):
         "摘要": safe_get(row, ["Abstract"]),
         "语种": lang,
         "原始文献类型": safe_get(row, ["Document type"]),
+        "发表状态": normalize_publication_status(safe_get(row, ["Publication stage", "Publication Stage", "Publication status", "Publication Status"])),
         "EI入藏号": safe_get(row, ["Accession number"]),
         "EI主题词": ei_terms,
         "EI分类号": safe_get(row, ["Classification code"]),
@@ -415,7 +645,7 @@ def merge_records(existing, new_data):
         if not sval or sval == "nan":
             continue
 
-        if key in ["收录类别", "来源库"]:
+        if key in ["收录类别", "来源库", "WOS记录号", "WOS研究方向", "WOS类目"]:
             if key in existing and existing[key]:
                 if sval not in existing[key]:
                     existing[key] += "; " + sval
@@ -457,13 +687,107 @@ def read_normal_csv_robust(file_path):
         return pd.read_csv(file_path, sep=sep, engine="python", dtype=str, encoding='utf-8-sig', on_bad_lines="skip")
 
 
-def main(files, output_file):
-    merged_db = {}
+def fetch_scopus_xml(doi: str, eid: str, api_key: str) -> str:
+    doi = (doi or "").strip()
+    eid = (eid or "").strip()
+    if not api_key or (not doi and not eid):
+        return ""
+    if doi:
+        url = f"https://api.elsevier.com/content/abstract/doi/{urllib.parse.quote(doi)}"
+    else:
+        url = f"https://api.elsevier.com/content/abstract/eid/{urllib.parse.quote(eid)}"
+    headers = {"X-ELS-APIKey": api_key, "Accept": "application/xml"}
+    resp = requests.get(url, headers=headers, params={"view": "FULL"}, timeout=20)
+    if resp.status_code == 404:
+        return ""
+    resp.raise_for_status()
+    return resp.text
 
-    print(f"准备处理 {len(files)} 个文件...")
 
-    for file_path in files:
+def parse_scopus_subjects(xml_text: str):
+    if not xml_text:
+        return ""
+    ns = {"ab": "http://www.elsevier.com/xml/svapi/abstract/dtd"}
+    root = ET.fromstring(xml_text)
+    names = []
+    for subject_area in root.findall(".//ab:subject-areas/ab:subject-area", ns):
+        name = (subject_area.text or "").strip()
+        if name:
+            names.append(name)
+    return "; ".join(names)
+
+
+def supplement_scopus_subjects(df, api_key):
+    if not api_key or df.empty:
+        return df
+    df = df.copy()
+    for col in ["DOI", "SCOPUSEID", "Scopus学科分类"]:
+        if col not in df.columns:
+            df[col] = ""
+    tasks = df[["DOI", "SCOPUSEID"]].fillna("").astype(str).drop_duplicates()
+    tasks = tasks[(tasks["DOI"].str.strip() != "") | (tasks["SCOPUSEID"].str.strip() != "")]
+    records = []
+    print(f"发现 {len(tasks)} 条文章记录，开始补充 Scopus 学科信息...")
+    for i, (doi, eid) in enumerate(tasks.values, start=1):
         try:
+            xml_text = fetch_scopus_xml(doi, eid, api_key)
+            subject_names = parse_scopus_subjects(xml_text)
+        except Exception as exc:
+            print(f"[{i}/{len(tasks)}] Scopus 学科查询失败: {exc}")
+            subject_names = ""
+        records.append({"DOI": doi, "SCOPUSEID": eid, "Scopus学科分类": subject_names})
+        sleep(0.2)
+    if not records:
+        return df
+    subjects = pd.DataFrame(records)
+    return df.drop(columns=["Scopus学科分类"], errors="ignore").merge(subjects, how="left", on=["DOI", "SCOPUSEID"])
+
+
+def run_conversion(
+    input_paths,
+    output_path,
+    mode,
+    accounts_path=None,
+    article_library_path=None,
+    alias_path=None,
+    scopus_api_key=None,
+):
+    merged_db = {}
+    publication_name_to_email = {}
+    is_external_achievement = mode in {"external", "校外", "非本校成果", "校外成果"}
+
+    print(f"准备处理 {len(input_paths)} 个文件...")
+    alias_registry = build_scholar_alias_registry(
+        accounts_path=accounts_path,
+        article_library_path=article_library_path,
+        alias_path=alias_path,
+    )
+    print(
+        f"学者别名表: 别名 {len(alias_registry.get('aliases', {}))} 条, "
+        f"当前使用的别名来源={alias_registry.get('alias_path') or '未找到'}, "
+        f"冲突别名 {len(alias_registry.get('conflict_aliases', []))} 条, "
+        f"账户表={'已加载' if alias_registry.get('account_path') else '未找到'}, "
+        f"文章库={'已加载' if alias_registry.get('article_library_path') else '未找到'}"
+    )
+    if is_external_achievement:
+        publication_name_to_email, mapping_info = build_publication_name_to_email(
+            article_library_path=article_library_path,
+            account_path=accounts_path,
+        )
+        if mapping_info["account_path"]:
+            print(f"已加载账户表: {mapping_info['account_path']}")
+        else:
+            print("未找到账户表，无法把姓名转换为邮箱；未匹配作者将填 unknown。")
+        if mapping_info["article_library_path"]:
+            print(f"已加载文章库: {mapping_info['article_library_path']}")
+        print(
+            f"映射统计: 发文名-姓名 {mapping_info['publication_name_count']} 条, "
+            f"姓名-邮箱 {mapping_info['email_count']} 条, 发文名-邮箱 {mapping_info['publication_email_count']} 条"
+        )
+
+    for file_path in input_paths:
+        try:
+            file_path = str(file_path)
             print(f"正在读取: {file_path}")
 
             if file_path.endswith(".csv"):
@@ -512,6 +836,10 @@ def main(files, output_file):
                 else:
                     record = process_scopus_row(row)
 
+                record = copy_claim_inputs(record, row)
+                if is_external_achievement:
+                    record[CLAIM_COLUMN] = build_claim_value(record, publication_name_to_email)
+
                 doi = record.get("DOI")
                 if doi:
                     if doi in merged_db:
@@ -524,18 +852,83 @@ def main(files, output_file):
 
     output_df = pd.DataFrame(list(merged_db.values()))
 
-    for col in TARGET_COLUMNS:
+    output_columns = get_output_columns(is_external_achievement)
+    for col in output_columns:
         if col not in output_df.columns:
             output_df[col] = ""
 
-    output_df = output_df[TARGET_COLUMNS]
-    output_df.to_excel(output_file, index=False)
-    print(f"完成！已保存到 {output_file}")
+    output_df = output_df[output_columns]
+    if scopus_api_key:
+        output_df = supplement_scopus_subjects(output_df, scopus_api_key)
+    output_df = apply_scope_fields(output_df, mode, alias_registry)
+    sheet_counts = write_multi_sheet_excel(output_df, output_path)
+    print(
+        "导出统计: "
+        + ", ".join(f"{name} {count} 条" for name, count in sheet_counts.items())
+    )
+    print(f"完成！已保存到 {output_path}")
+    return {
+        "output_path": str(output_path),
+        "total": sheet_counts.get("全部数据", 0),
+        "local": sheet_counts.get("本校成果", 0),
+        "external_ready": sheet_counts.get("校外成果", 0),
+        "pending": sheet_counts.get("待确认", 0),
+        "missing_email": sheet_counts.get("需补邮箱", 0),
+        "sheet_counts": sheet_counts,
+        "alias_path": alias_registry.get("alias_path", ""),
+        "alias_count": len(alias_registry.get("aliases", {})),
+        "conflict_alias_count": len(alias_registry.get("conflict_aliases", [])),
+    }
+
+
+def main(files, output_file, is_external_achievement=False, article_library_path=None, account_path=None, alias_path=None):
+    mode = "external" if is_external_achievement else "local"
+    return run_conversion(
+        files,
+        output_file,
+        mode,
+        accounts_path=account_path,
+        article_library_path=article_library_path,
+        alias_path=alias_path,
+    )
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python3 converter.py result.xlsx input1 input2 ...")
+        print("Usage: python3 converter.py result.xlsx [--local|--external] input1 input2 ...")
         sys.exit(1)
 
-    main(sys.argv[2:], sys.argv[1])
+    args = sys.argv[2:]
+    is_external = False
+    article_library_path = None
+    account_path = None
+    alias_path = None
+    input_files = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ["--external", "--non-local", "--outside"]:
+            is_external = True
+        elif arg == "--local":
+            is_external = False
+        elif arg == "--article-library" and i + 1 < len(args):
+            article_library_path = args[i + 1]
+            i += 1
+        elif arg == "--accounts" and i + 1 < len(args):
+            account_path = args[i + 1]
+            i += 1
+        elif arg in ["--aliases", "--alias-file"] and i + 1 < len(args):
+            alias_path = args[i + 1]
+            i += 1
+        else:
+            input_files.append(arg)
+        i += 1
+
+    main(
+        input_files,
+        sys.argv[1],
+        is_external_achievement=is_external,
+        article_library_path=article_library_path,
+        account_path=account_path,
+        alias_path=alias_path,
+    )
