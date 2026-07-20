@@ -102,13 +102,23 @@ legend {
 }
 
 input[type="file"],
-input[type="password"] {
+input[type="password"],
+textarea {
   width: 100%;
   border: 1px solid #c9d1dc;
   border-radius: 6px;
-  min-height: 38px;
   padding: 7px 9px;
   background: #fff;
+}
+
+input[type="file"],
+input[type="password"] {
+  min-height: 38px;
+}
+
+textarea {
+  min-height: 72px;
+  resize: vertical;
 }
 
 .mode {

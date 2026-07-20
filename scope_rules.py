@@ -1,3 +1,4 @@
+from copy import deepcopy
 import re
 from pathlib import Path
 
@@ -97,6 +98,144 @@ def _is_valid_alias(value):
 def _claimable_email_or_empty(email):
     email = str(email or "").strip()
     return email if is_claimable_email(email) else ""
+
+
+def _has_claim_email_filter_value(value):
+    if value is None:
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return any(_has_claim_email_filter_value(item) for item in value)
+    return bool(str(value).strip())
+
+
+def parse_claim_email_filter(value) -> list[str]:
+    emails = []
+    seen = set()
+
+    def add_email(raw_email):
+        email = str(raw_email or "").strip().strip("<>()[]{}，,;；").lower()
+        if not is_claimable_email(email) or email in seen:
+            return
+        seen.add(email)
+        emails.append(email)
+
+    def collect(raw_value):
+        if raw_value is None:
+            return
+        if isinstance(raw_value, (list, tuple, set)):
+            for item in raw_value:
+                collect(item)
+            return
+        text = str(raw_value).strip()
+        if not text:
+            return
+        matches = re.findall(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", text)
+        if matches:
+            for match in matches:
+                add_email(match)
+            return
+        for part in re.split(r"[;；,\s]+", text):
+            add_email(part)
+
+    collect(value)
+    return emails
+
+
+def _alias_candidate(entry, source=None):
+    sources = entry.get("sources", [])
+    if isinstance(sources, set):
+        sources = sorted(sources)
+    if source:
+        sources = [source]
+    return {
+        "real_name": str(entry.get("real_name", "") or "").strip(),
+        "email": _claimable_email_or_empty(entry.get("email", "")),
+        "scholar_id": str(entry.get("scholar_id", "") or "").strip(),
+        "sources": sources,
+    }
+
+
+def _candidate_key(candidate):
+    return (
+        normalize_name(candidate.get("real_name", "")),
+        str(candidate.get("email", "") or "").strip().lower(),
+        str(candidate.get("scholar_id", "") or "").strip(),
+    )
+
+
+def filter_alias_registry_by_emails(alias_registry: dict | None, email_filter) -> dict:
+    registry = alias_registry or {"aliases": {}, "local_keywords": LOCAL_AFFILIATION_KEYWORDS.copy()}
+    if not _has_claim_email_filter_value(email_filter):
+        return registry
+
+    allowed_emails = set(parse_claim_email_filter(email_filter))
+    filtered = {
+        key: deepcopy(value)
+        for key, value in registry.items()
+        if key not in {"aliases", "conflict_aliases"}
+    }
+    filtered["aliases"] = {}
+    filtered["conflict_aliases"] = set()
+    filtered["claim_email_filter"] = sorted(allowed_emails)
+    matched_emails = set()
+
+    for key, entry in registry.get("aliases", {}).items():
+        candidates = []
+        seen_candidates = set()
+
+        main_candidate = _alias_candidate(entry)
+        if str(main_candidate.get("email", "")).lower() in allowed_emails:
+            candidates.append(main_candidate)
+            seen_candidates.add(_candidate_key(main_candidate))
+
+        for conflict in entry.get("conflicts", []) or []:
+            conflict_candidate = _alias_candidate(conflict, source=conflict.get("source", ""))
+            if str(conflict_candidate.get("email", "")).lower() not in allowed_emails:
+                continue
+            candidate_key = _candidate_key(conflict_candidate)
+            if candidate_key in seen_candidates:
+                continue
+            candidates.append(conflict_candidate)
+            seen_candidates.add(candidate_key)
+
+        if not candidates:
+            continue
+
+        matched_emails.update(candidate["email"].lower() for candidate in candidates if candidate.get("email"))
+        selected = candidates[0]
+        filtered_entry = deepcopy(entry)
+        filtered_entry["real_name"] = selected.get("real_name", "")
+        filtered_entry["email"] = selected.get("email", "")
+        filtered_entry["scholar_id"] = selected.get("scholar_id", "")
+        filtered_entry["sources"] = selected.get("sources", [])
+        filtered_entry["conflicts"] = []
+
+        for conflict_candidate in candidates[1:]:
+            filtered_entry["conflicts"].append({
+                "real_name": conflict_candidate.get("real_name", ""),
+                "email": conflict_candidate.get("email", ""),
+                "scholar_id": conflict_candidate.get("scholar_id", ""),
+                "source": "、".join(conflict_candidate.get("sources", []) or []),
+            })
+            filtered["conflict_aliases"].add(key)
+
+        filtered["aliases"][key] = filtered_entry
+
+    filtered["claim_email_filter_matched"] = sorted(matched_emails)
+    filtered["claim_email_filter_unmatched"] = sorted(allowed_emails - matched_emails)
+    return _finalize_registry(filtered)
+
+
+def filter_publication_name_to_email_by_emails(publication_name_to_email: dict | None, email_filter) -> dict:
+    mapping = publication_name_to_email or {}
+    if not _has_claim_email_filter_value(email_filter):
+        return mapping
+    allowed_emails = set(parse_claim_email_filter(email_filter))
+    return {
+        name: email
+        for name, email in mapping.items()
+        if str(email or "").strip().lower() in allowed_emails
+    }
 
 
 def _is_priority_alias_source(source):

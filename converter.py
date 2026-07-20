@@ -12,6 +12,9 @@ from scope_rules import (
     SCOPE_COLUMNS,
     apply_scope_fields,
     build_scholar_alias_registry,
+    filter_alias_registry_by_emails,
+    filter_publication_name_to_email_by_emails,
+    parse_claim_email_filter,
     write_multi_sheet_excel,
 )
 
@@ -759,6 +762,7 @@ def run_conversion(
     article_library_path=None,
     alias_path=None,
     scopus_api_key=None,
+    claim_email_filter=None,
 ):
     merged_db = {}
     publication_name_to_email = {}
@@ -770,6 +774,19 @@ def run_conversion(
         article_library_path=article_library_path,
         alias_path=alias_path,
     )
+    claim_filter_emails = parse_claim_email_filter(claim_email_filter) if is_external_achievement else []
+    if is_external_achievement and str(claim_email_filter or "").strip():
+        original_alias_count = len(alias_registry.get("aliases", {}))
+        alias_registry = filter_alias_registry_by_emails(alias_registry, claim_email_filter)
+        print(
+            f"限定作品认领匹配邮箱: 有效邮箱 {len(claim_filter_emails)} 个, "
+            f"别名 {original_alias_count} -> {len(alias_registry.get('aliases', {}))} 条"
+        )
+        if alias_registry.get("claim_email_filter_unmatched"):
+            print(
+                "未在别名表中找到这些邮箱对应的别名: "
+                + "; ".join(alias_registry["claim_email_filter_unmatched"])
+            )
     print(
         f"学者别名表: 别名 {len(alias_registry.get('aliases', {}))} 条, "
         f"当前使用的别名来源={alias_registry.get('alias_path') or '未找到'}, "
@@ -782,6 +799,15 @@ def run_conversion(
             article_library_path=article_library_path,
             account_path=accounts_path,
         )
+        if str(claim_email_filter or "").strip():
+            original_mapping_count = len(publication_name_to_email)
+            publication_name_to_email = filter_publication_name_to_email_by_emails(
+                publication_name_to_email,
+                claim_email_filter,
+            )
+            print(
+                f"限定发文名-邮箱映射: {original_mapping_count} -> {len(publication_name_to_email)} 条"
+            )
         if mapping_info["account_path"]:
             print(f"已加载账户表: {mapping_info['account_path']}")
         else:
@@ -886,10 +912,21 @@ def run_conversion(
         "alias_path": alias_registry.get("alias_path", ""),
         "alias_count": len(alias_registry.get("aliases", {})),
         "conflict_alias_count": len(alias_registry.get("conflict_aliases", [])),
+        "claim_email_filter": claim_filter_emails,
+        "claim_email_filter_matched": alias_registry.get("claim_email_filter_matched", []),
+        "claim_email_filter_unmatched": alias_registry.get("claim_email_filter_unmatched", []),
     }
 
 
-def main(files, output_file, is_external_achievement=False, article_library_path=None, account_path=None, alias_path=None):
+def main(
+    files,
+    output_file,
+    is_external_achievement=False,
+    article_library_path=None,
+    account_path=None,
+    alias_path=None,
+    claim_email_filter=None,
+):
     mode = "external" if is_external_achievement else "local"
     return run_conversion(
         files,
@@ -898,6 +935,7 @@ def main(files, output_file, is_external_achievement=False, article_library_path
         accounts_path=account_path,
         article_library_path=article_library_path,
         alias_path=alias_path,
+        claim_email_filter=claim_email_filter,
     )
 
 
@@ -911,6 +949,7 @@ if __name__ == "__main__":
     article_library_path = None
     account_path = None
     alias_path = None
+    claim_email_filter = None
     input_files = []
     i = 0
     while i < len(args):
@@ -928,6 +967,9 @@ if __name__ == "__main__":
         elif arg in ["--aliases", "--alias-file"] and i + 1 < len(args):
             alias_path = args[i + 1]
             i += 1
+        elif arg in ["--claim-emails", "--claim-email-filter"] and i + 1 < len(args):
+            claim_email_filter = args[i + 1]
+            i += 1
         else:
             input_files.append(arg)
         i += 1
@@ -939,4 +981,5 @@ if __name__ == "__main__":
         article_library_path=article_library_path,
         account_path=account_path,
         alias_path=alias_path,
+        claim_email_filter=claim_email_filter,
     )

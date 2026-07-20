@@ -1,5 +1,5 @@
 const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/";
-const APP_VERSION = "20260720-review-split";
+const APP_VERSION = "20260720-claim-email-filter";
 const MODULE_FILES = ["claim_mapping.py", "scope_rules.py", "converter.py"];
 
 const els = {
@@ -12,6 +12,7 @@ const els = {
   articleFile: document.getElementById("articleFile"),
   aliasFile: document.getElementById("aliasFile"),
   apiKey: document.getElementById("apiKey"),
+  claimEmailFilter: document.getElementById("claimEmailFilter"),
   downloadXlsx: document.getElementById("downloadXlsx"),
   downloadCsv: document.getElementById("downloadCsv"),
 };
@@ -158,6 +159,7 @@ async function runConversionInBrowser() {
     pyodide.globals.set("ARTICLE_PATH", articlePath || "");
     pyodide.globals.set("ALIAS_PATH", aliasPath || "");
     pyodide.globals.set("SCOPUS_API_KEY", els.apiKey.value.trim());
+    pyodide.globals.set("CLAIM_EMAIL_FILTER", els.claimEmailFilter.value.trim());
 
     const stats = await pyodide.runPythonAsync(`
 import json
@@ -172,6 +174,7 @@ stats = run_conversion(
     article_library_path=ARTICLE_PATH or None,
     alias_path=ALIAS_PATH or None,
     scopus_api_key=SCOPUS_API_KEY or None,
+    claim_email_filter=CLAIM_EMAIL_FILTER or None,
 )
 all_df = pd.read_excel(OUTPUT_PATH, sheet_name="全部数据", dtype=str)
 all_df.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")

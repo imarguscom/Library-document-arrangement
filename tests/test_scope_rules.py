@@ -10,8 +10,11 @@ from scope_rules import (
     apply_scope_fields,
     build_author_claim_value,
     build_scholar_alias_registry,
+    filter_alias_registry_by_emails,
+    filter_publication_name_to_email_by_emails,
     infer_record_scope,
     normalize_name,
+    parse_claim_email_filter,
     split_output_frames,
     split_author_names,
     write_multi_sheet_excel,
@@ -277,6 +280,84 @@ def test_claim_value_preserves_author_positions(tmp_path, monkeypatch):
     assert claim == "jiawei@cuhk.edu.cn;ming@cuhk.edu.cn;unknown"
 
 
+def test_claim_email_filter_limits_external_alias_matching(tmp_path, monkeypatch):
+    _disable_default_account_and_article_discovery(monkeypatch)
+    alias_path = tmp_path / "博文阁用户别名表.xlsx"
+    pd.DataFrame(
+        [
+            {"别名": "Wang, Jiawei", "姓名": "王嘉伟", "邮箱": "jiawei@cuhk.edu.cn"},
+            {"别名": "Li, Ming", "姓名": "李明", "邮箱": "ming@cuhk.edu.cn"},
+        ]
+    ).to_excel(alias_path, sheet_name="epersonnamealias", index=False)
+    registry = build_scholar_alias_registry(accounts_path=None, article_library_path=None, alias_path=alias_path)
+    filtered = filter_alias_registry_by_emails(registry, "jiawei@cuhk.edu.cn")
+    df = pd.DataFrame([{"题名": "A", "作者": "Wang, Jiawei; Li, Ming", CLAIM_COLUMN: "unknown;unknown"}])
+
+    result = apply_scope_fields(df, "external", filtered)
+
+    assert result.loc[0, "本校学者匹配"] == "王嘉伟"
+    assert result.loc[0, "本校学者邮箱"] == "jiawei@cuhk.edu.cn"
+    assert result.loc[0, CLAIM_COLUMN] == "jiawei@cuhk.edu.cn;unknown"
+    assert "ming@cuhk.edu.cn" not in result.loc[0, CLAIM_COLUMN]
+
+
+def test_claim_email_filter_resolves_selected_conflict(tmp_path, monkeypatch):
+    _disable_default_account_and_article_discovery(monkeypatch)
+    alias_path = tmp_path / "博文阁用户别名表.xlsx"
+    pd.DataFrame(
+        [
+            {"别名": "Same, Alias", "姓名": "学者甲", "邮箱": "a@cuhk.edu.cn"},
+            {"别名": "Same, Alias", "姓名": "学者乙", "邮箱": "b@cuhk.edu.cn"},
+        ]
+    ).to_excel(alias_path, sheet_name="epersonnamealias", index=False)
+    registry = build_scholar_alias_registry(accounts_path=None, article_library_path=None, alias_path=alias_path)
+
+    selected = filter_alias_registry_by_emails(registry, "b@cuhk.edu.cn")
+    scope = infer_record_scope({"题名": "A", "作者": "Same, Alias"}, "external", selected)
+
+    assert scope["本校学者匹配"] == "学者乙"
+    assert scope["本校学者邮箱"] == "b@cuhk.edu.cn"
+    assert selected["conflict_aliases"] == []
+
+
+def test_claim_email_filter_keeps_selected_conflicts_pending(tmp_path, monkeypatch):
+    _disable_default_account_and_article_discovery(monkeypatch)
+    alias_path = tmp_path / "博文阁用户别名表.xlsx"
+    pd.DataFrame(
+        [
+            {"别名": "Same, Alias", "姓名": "学者甲", "邮箱": "a@cuhk.edu.cn"},
+            {"别名": "Same, Alias", "姓名": "学者乙", "邮箱": "b@cuhk.edu.cn"},
+        ]
+    ).to_excel(alias_path, sheet_name="epersonnamealias", index=False)
+    registry = build_scholar_alias_registry(accounts_path=None, article_library_path=None, alias_path=alias_path)
+
+    selected = filter_alias_registry_by_emails(registry, "a@cuhk.edu.cn; b@cuhk.edu.cn")
+    scope = infer_record_scope({"题名": "A", "作者": "Same, Alias"}, "external", selected)
+
+    assert scope["本校学者匹配"] == "待确认"
+    assert scope["本校学者邮箱"] == ""
+    assert selected["conflict_aliases"] == [normalize_name("Same, Alias")]
+
+
+def test_publication_name_to_email_filter_uses_only_selected_emails():
+    mapping = {
+        normalize_name("Wang, Jiawei"): "jiawei@cuhk.edu.cn",
+        normalize_name("Li, Ming"): "ming@cuhk.edu.cn",
+    }
+
+    filtered = filter_publication_name_to_email_by_emails(mapping, "jiawei@cuhk.edu.cn")
+
+    assert filtered == {normalize_name("Wang, Jiawei"): "jiawei@cuhk.edu.cn"}
+
+
+def test_claim_email_filter_parses_only_claimable_school_emails():
+    parsed = parse_claim_email_filter(
+        "Teacher <Teacher@CUHK.EDU.CN>, student@link.cuhk.edu.cn; other@example.com"
+    )
+
+    assert parsed == ["teacher@cuhk.edu.cn"]
+
+
 def test_link_email_is_not_claimable(tmp_path, monkeypatch):
     _disable_default_account_and_article_discovery(monkeypatch)
     alias_path = tmp_path / "博文阁用户别名表.xlsx"
@@ -326,3 +407,53 @@ def test_default_alias_discovery_used_by_converter(tmp_path, monkeypatch):
     assert {"全部数据", "校外成果", "待确认", "需补邮箱"}.issubset(set(xl.sheet_names))
     external = pd.read_excel(output_path, sheet_name="校外成果", dtype=str).fillna("")
     assert external.loc[0, "本校学者邮箱"] == "chen@cuhk.edu.cn"
+
+
+def test_run_conversion_claim_email_filter_limits_claim_prefill(tmp_path, monkeypatch):
+    _disable_default_account_and_article_discovery(monkeypatch)
+    alias_path = tmp_path / "博文阁用户别名表.xlsx"
+    account_path = tmp_path / "accounts.xlsx"
+    input_path = tmp_path / "scopus.csv"
+    output_path = tmp_path / "out.xlsx"
+    pd.DataFrame(
+        [
+            {"别名": "Wang, Jiawei", "姓名": "王嘉伟", "邮箱": "jiawei@cuhk.edu.cn"},
+            {"别名": "Li, Ming", "姓名": "李明", "邮箱": "ming@cuhk.edu.cn"},
+        ]
+    ).to_excel(alias_path, sheet_name="epersonnamealias", index=False)
+    pd.DataFrame(
+        [
+            {"姓名": "王嘉伟", "英文名": "Wang, Jiawei", "Email": "jiawei@cuhk.edu.cn"},
+            {"姓名": "李明", "英文名": "Li, Ming", "Email": "ming@cuhk.edu.cn"},
+        ]
+    ).to_excel(account_path, index=False)
+    pd.DataFrame(
+        [
+            {
+                "DOI": "10.1000/test-filter",
+                "Title": "Claim Filter Test",
+                "Authors": "Wang, Jiawei; Li, Ming",
+                "Year": "2026",
+                "Source title": "Journal",
+                "EID": "2-s2.0-filter",
+            }
+        ]
+    ).to_csv(input_path, index=False)
+
+    from converter import run_conversion
+
+    stats = run_conversion(
+        [input_path],
+        output_path,
+        "external",
+        accounts_path=account_path,
+        article_library_path=None,
+        alias_path=alias_path,
+        claim_email_filter="jiawei@cuhk.edu.cn",
+    )
+    all_data = pd.read_excel(output_path, sheet_name="全部数据", dtype=str).fillna("")
+
+    assert stats["claim_email_filter"] == ["jiawei@cuhk.edu.cn"]
+    assert all_data.loc[0, "本校学者邮箱"] == "jiawei@cuhk.edu.cn"
+    assert all_data.loc[0, CLAIM_COLUMN] == "jiawei@cuhk.edu.cn;unknown"
+    assert "ming@cuhk.edu.cn" not in all_data.loc[0, CLAIM_COLUMN]

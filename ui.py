@@ -15,6 +15,9 @@ from scope_rules import (
     SCOPE_COLUMNS,
     apply_scope_fields,
     build_scholar_alias_registry,
+    filter_alias_registry_by_emails,
+    filter_publication_name_to_email_by_emails,
+    parse_claim_email_filter,
     write_multi_sheet_excel,
 )
 
@@ -771,32 +774,37 @@ class App(ctk.CTk):
         )
         self.type_help.grid(row=3, column=0, columnspan=3, padx=20, pady=(8, 0), sticky="w")
 
+        self.claim_filter_label = ctk.CTkLabel(self, text="限定匹配邮箱:", font=("Arial", 14, "bold"))
+        self.claim_filter_label.grid(row=4, column=0, padx=20, pady=(15, 0), sticky="w")
+        self.claim_filter_entry = ctk.CTkEntry(self, width=400, placeholder_text="可选，仅非本校成果生效；多个邮箱用逗号或分号分隔")
+        self.claim_filter_entry.grid(row=4, column=1, padx=20, pady=(15, 0), sticky="w")
+
         self.article_label = ctk.CTkLabel(self, text="文章库:", font=("Arial", 14, "bold"))
-        self.article_label.grid(row=4, column=0, padx=20, pady=(15, 0), sticky="w")
+        self.article_label.grid(row=5, column=0, padx=20, pady=(15, 0), sticky="w")
         self.article_entry = ctk.CTkEntry(self, width=400, placeholder_text="可选，默认使用内置文章库")
-        self.article_entry.grid(row=4, column=1, padx=20, pady=(15, 0), sticky="w")
+        self.article_entry.grid(row=5, column=1, padx=20, pady=(15, 0), sticky="w")
         self.article_btn = ctk.CTkButton(self, text="选择文件...", width=90, command=self.browse_article_library)
-        self.article_btn.grid(row=4, column=2, padx=10, pady=(15, 0))
+        self.article_btn.grid(row=5, column=2, padx=10, pady=(15, 0))
 
         self.account_label = ctk.CTkLabel(self, text="账户表:", font=("Arial", 14, "bold"))
-        self.account_label.grid(row=5, column=0, padx=20, pady=(15, 0), sticky="w")
+        self.account_label.grid(row=6, column=0, padx=20, pady=(15, 0), sticky="w")
         self.account_entry = ctk.CTkEntry(self, width=400, placeholder_text="可选，默认使用内置账户表")
-        self.account_entry.grid(row=5, column=1, padx=20, pady=(15, 0), sticky="w")
+        self.account_entry.grid(row=6, column=1, padx=20, pady=(15, 0), sticky="w")
         self.account_btn = ctk.CTkButton(self, text="选择文件...", width=90, command=self.browse_account_file)
-        self.account_btn.grid(row=5, column=2, padx=10, pady=(15, 0))
+        self.account_btn.grid(row=6, column=2, padx=10, pady=(15, 0))
 
         self.out_label = ctk.CTkLabel(self, text="保存最终结果:", font=("Arial", 14, "bold"))
-        self.out_label.grid(row=6, column=0, padx=20, pady=(15, 0), sticky="w")
+        self.out_label.grid(row=7, column=0, padx=20, pady=(15, 0), sticky="w")
         self.out_entry = ctk.CTkEntry(self, width=400)
-        self.out_entry.grid(row=6, column=1, padx=20, pady=(15, 0), sticky="w")
+        self.out_entry.grid(row=7, column=1, padx=20, pady=(15, 0), sticky="w")
         self.out_btn = ctk.CTkButton(self, text="选择保存...", width=90, command=self.browse_output)
-        self.out_btn.grid(row=6, column=2, padx=10, pady=(15, 0))
+        self.out_btn.grid(row=7, column=2, padx=10, pady=(15, 0))
 
         self.run_btn = ctk.CTkButton(self, text="开始运行", font=("Arial", 16, "bold"), command=self.start_processing)
-        self.run_btn.grid(row=7, column=0, columnspan=3, pady=(25, 10))
+        self.run_btn.grid(row=8, column=0, columnspan=3, pady=(25, 10))
 
-        self.log_box = ctk.CTkTextbox(self, width=700, height=300, font=("Consolas", 12))
-        self.log_box.grid(row=8, column=0, columnspan=3, padx=20, pady=(10, 20))
+        self.log_box = ctk.CTkTextbox(self, width=700, height=250, font=("Consolas", 12))
+        self.log_box.grid(row=9, column=0, columnspan=3, padx=20, pady=(10, 20))
         sys.stdout = RedirectText(self.log_box)
 
     def browse_inputs(self):
@@ -834,6 +842,7 @@ class App(ctk.CTk):
         is_external_achievement = self.achievement_type.get() == "非本校成果"
         article_library_file = self.article_entry.get().strip()
         account_file = self.account_entry.get().strip()
+        claim_email_filter = self.claim_filter_entry.get().strip()
 
         if not self.input_files or not out_file:
             print("错误：请确保已选择输入文件并设置保存位置。")
@@ -842,10 +851,19 @@ class App(ctk.CTk):
 
         threading.Thread(
             target=self.run_pipeline,
-            args=(api_key, self.input_files, out_file, is_external_achievement, article_library_file, account_file),
+            args=(api_key, self.input_files, out_file, is_external_achievement, article_library_file, account_file, claim_email_filter),
         ).start()
 
-    def run_pipeline(self, api_key, input_files, out_file, is_external_achievement=False, article_library_file="", account_file=""):
+    def run_pipeline(
+        self,
+        api_key,
+        input_files,
+        out_file,
+        is_external_achievement=False,
+        article_library_file="",
+        account_file="",
+        claim_email_filter="",
+    ):
         try:
             print("================ 第一阶段：合并与清洗 ================")
             print(f"成果类型：{'校外成果（匹配本校学者邮箱用于作品认领）' if is_external_achievement else '本校成果'}")
@@ -855,6 +873,19 @@ class App(ctk.CTk):
                 accounts_path=account_file or None,
                 article_library_path=article_library_file or None,
             )
+            claim_filter_emails = parse_claim_email_filter(claim_email_filter) if is_external_achievement else []
+            if is_external_achievement and claim_email_filter.strip():
+                original_alias_count = len(alias_registry.get("aliases", {}))
+                alias_registry = filter_alias_registry_by_emails(alias_registry, claim_email_filter)
+                print(
+                    f"限定作品认领匹配邮箱: 有效邮箱 {len(claim_filter_emails)} 个, "
+                    f"别名 {original_alias_count} -> {len(alias_registry.get('aliases', {}))} 条"
+                )
+                if alias_registry.get("claim_email_filter_unmatched"):
+                    print(
+                        "未在别名表中找到这些邮箱对应的别名: "
+                        + "; ".join(alias_registry["claim_email_filter_unmatched"])
+                    )
             formal_alias_path = str(FORMAL_BOWENGE_ALIAS_PATH)
             if alias_registry.get("alias_path") and alias_registry.get("alias_path").endswith(formal_alias_path):
                 print(f"发现 {formal_alias_path}，已作为优先别名表。")
@@ -874,6 +905,15 @@ class App(ctk.CTk):
                     article_library_path=article_library_file or None,
                     account_path=account_file or None,
                 )
+                if claim_email_filter.strip():
+                    original_mapping_count = len(publication_name_to_email)
+                    publication_name_to_email = filter_publication_name_to_email_by_emails(
+                        publication_name_to_email,
+                        claim_email_filter,
+                    )
+                    print(
+                        f"限定发文名-邮箱映射: {original_mapping_count} -> {len(publication_name_to_email)} 条"
+                    )
                 if mapping_info["account_path"]:
                     print(f"已加载账户表: {mapping_info['account_path']}")
                 else:

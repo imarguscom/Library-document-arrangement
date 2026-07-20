@@ -6,7 +6,7 @@
     <title>文献数据合并与博文阁导入工具</title>
     <link rel="stylesheet" href="./style.css" />
     <script defer src="https://cdn.jsdelivr.net/pyodide/v0.28.3/full/pyodide.js"></script>
-    <script defer src="./app.js?v=20260720-review-split"></script>
+    <script defer src="./app.js?v=20260720-claim-email-filter"></script>
   </head>
   <body>
     <main class="shell">
@@ -49,6 +49,11 @@
           <label class="field">
             <span>Scopus API Key</span>
             <input id="apiKey" type="password" autocomplete="off" />
+          </label>
+
+          <label class="field wide">
+            <span>限定作品认领匹配邮箱</span>
+            <textarea id="claimEmailFilter" rows="3" placeholder="可选，仅校外成果生效；teacher1@cuhk.edu.cn; teacher2@cuhk.edu.cn"></textarea>
           </label>
         </div>
 
