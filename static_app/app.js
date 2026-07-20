@@ -1,4 +1,5 @@
 const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/";
+const APP_VERSION = "20260720-review-split";
 const MODULE_FILES = ["claim_mapping.py", "scope_rules.py", "converter.py"];
 
 const els = {
@@ -77,7 +78,7 @@ async function loadRuntime() {
     pyodide.FS.mkdirTree("/app");
     pyodide.FS.mkdirTree("/work");
     for (const file of MODULE_FILES) {
-      const response = await fetch(`../${file}`, { cache: "no-store" });
+      const response = await fetch(`../${file}?v=${APP_VERSION}`, { cache: "no-store" });
       if (!response.ok) throw new Error(`无法加载 ${file}: HTTP ${response.status}`);
       pyodide.FS.writeFile(`/app/${file}`, await response.text(), { encoding: "utf8" });
     }
