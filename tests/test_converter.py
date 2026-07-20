@@ -6,11 +6,24 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from converter import normalize_doi, process_ei_row, process_scopus_row, read_normal_csv_robust
+from converter import normalize_doi, normalize_wos_index, process_ei_row, process_scopus_row, read_normal_csv_robust
 
 
 def test_normalize_doi_strips_prefix_and_spaces():
     assert normalize_doi(" DOI: https://doi.org/10.1000/ABC  ") == "10.1000/abc"
+
+
+def test_normalize_wos_index_preserves_multiple_indexes():
+    raw = (
+        "Science Citation Index Expanded (SCI-EXPANDED); "
+        "Conference Proceedings Citation Index - Science (CPCI-S); "
+        "Social Sciences Citation Index (SSCI); "
+        "Arts & Humanities Citation Index (A&HCI); "
+        "Emerging Sources Citation Index; "
+        "Book Citation Index (BKCI)"
+    )
+
+    assert normalize_wos_index(raw) == "SCIE; CPCI-S; SSCI; A&HCI; ESCI; BKCI"
 
 
 def test_process_ei_row_keeps_author_and_affiliation_fields():

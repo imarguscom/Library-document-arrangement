@@ -12,6 +12,7 @@ from scope_rules import (
     build_scholar_alias_registry,
     infer_record_scope,
     normalize_name,
+    split_output_frames,
     split_author_names,
     write_multi_sheet_excel,
 )
@@ -101,11 +102,27 @@ def test_excel_output_contains_expected_sheets(tmp_path):
     output = tmp_path / "out.xlsx"
     counts = write_multi_sheet_excel(output_df, output)
     sheets = pd.ExcelFile(output).sheet_names
-    assert {"全部数据", "本校成果", "校外成果", "待确认"}.issubset(set(sheets))
+    assert {"全部数据", "期刊论文", "会议论文", "综述论文", "本校成果", "校外成果", "待确认"}.issubset(set(sheets))
     assert counts["全部数据"] == 3
     assert counts["本校成果"] == 1
     assert counts["校外成果"] == 1
     assert counts["待确认"] == 1
+
+
+def test_split_output_frames_separates_article_conference_and_review():
+    df = pd.DataFrame(
+        [
+            {"题名": "Article", "原始文献类型": "Article", "数据归属": "本校"},
+            {"题名": "Conference", "原始文献类型": "Conference paper", "数据归属": "本校"},
+            {"题名": "Review", "原始文献类型": "Review; Early Access", "数据归属": "本校"},
+        ]
+    )
+
+    frames = split_output_frames(df)
+
+    assert frames["期刊论文"]["题名"].tolist() == ["Article"]
+    assert frames["会议论文"]["题名"].tolist() == ["Conference"]
+    assert frames["综述论文"]["题名"].tolist() == ["Review"]
 
 
 def test_default_scholar_author_name_forms_structure_can_be_read():

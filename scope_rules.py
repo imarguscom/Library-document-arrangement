@@ -558,6 +558,11 @@ def is_conference_record(row) -> bool:
     return any(marker in text for marker in conference_markers)
 
 
+def is_review_record(row) -> bool:
+    doc_type = str(row.get("原始文献类型", "") or "").strip().lower()
+    return "review" in doc_type or "综述" in doc_type
+
+
 def split_output_frames(df: pd.DataFrame) -> dict:
     for col in [CLAIM_COLUMN, *SCOPE_COLUMNS]:
         if col not in df.columns:
@@ -568,13 +573,16 @@ def split_output_frames(df: pd.DataFrame) -> dict:
     external_ready_df = df[(df["数据归属"] == "校外") & (email != "")]
     needs_email_df = df[(df["数据归属"] == "校外") & (email == "") & (matched != "") & (matched != "待确认")]
     pending_df = df[(df["数据归属"] == "校外") & ((email == "") | (matched == "待确认"))]
-    conference_mask = df.apply(is_conference_record, axis=1)
+    review_mask = df.apply(is_review_record, axis=1)
+    conference_mask = df.apply(is_conference_record, axis=1) & ~review_mask
     conference_df = df[conference_mask]
-    journal_df = df[~conference_mask]
+    review_df = df[review_mask]
+    journal_df = df[~conference_mask & ~review_mask]
     return {
         "全部数据": df,
         "期刊论文": journal_df,
         "会议论文": conference_df,
+        "综述论文": review_df,
         "本校成果": local_df,
         "校外成果": external_ready_df,
         "待确认": pending_df,

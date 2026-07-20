@@ -97,10 +97,18 @@ def normalize_wos_index(index_text):
     mappings = [
         ("SCI-EXPANDED", "SCIE"),
         ("SCIENCE CITATION INDEX EXPANDED", "SCIE"),
+        ("CONFERENCE PROCEEDINGS CITATION INDEX - SCIENCE", "CPCI-S"),
+        ("CONFERENCE PROCEEDINGS CITATION INDEX-SCIENCE", "CPCI-S"),
+        ("CPCI-S", "CPCI-S"),
         ("SOCIAL SCIENCES CITATION INDEX", "SSCI"),
+        ("SSCI", "SSCI"),
         ("ARTS & HUMANITIES CITATION INDEX", "A&HCI"),
         ("ARTS AND HUMANITIES CITATION INDEX", "A&HCI"),
+        ("A&HCI", "A&HCI"),
         ("EMERGING SOURCES CITATION INDEX", "ESCI"),
+        ("ESCI", "ESCI"),
+        ("BOOK CITATION INDEX", "BKCI"),
+        ("BKCI", "BKCI"),
     ]
     upper = text.upper()
     values = []

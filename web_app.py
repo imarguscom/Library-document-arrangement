@@ -24,7 +24,7 @@ def _save_uploaded_file(uploaded_file, directory: Path) -> str:
 def _read_preview_frames(output_path: str):
     xl = pd.ExcelFile(output_path)
     frames = {}
-    for sheet in ["全部数据", "期刊论文", "会议论文", "校外成果", "待确认", "需补邮箱"]:
+    for sheet in ["全部数据", "期刊论文", "会议论文", "综述论文", "校外成果", "待确认", "需补邮箱"]:
         if sheet in xl.sheet_names:
             frames[sheet] = pd.read_excel(output_path, sheet_name=sheet, dtype=str, nrows=100)
     return frames
@@ -134,7 +134,7 @@ def main():
             c12.metric("WOS记录号非空", int(wos_record_count))
             st.caption(f"当前使用的别名来源：{stats.get('alias_path') or '未找到；已回退到账户表/文章库等来源'}")
 
-            preview_sheet_names = ["全部数据", "期刊论文", "会议论文", "校外成果", "待确认", "需补邮箱"]
+            preview_sheet_names = ["全部数据", "期刊论文", "会议论文", "综述论文", "校外成果", "待确认", "需补邮箱"]
             tabs = st.tabs(preview_sheet_names)
             for tab, sheet_name in zip(tabs, preview_sheet_names):
                 with tab:
