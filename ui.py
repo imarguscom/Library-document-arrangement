@@ -67,7 +67,46 @@ def normalize_doi(doi):
 def clean_name_keep_full(name_str):
     if pd.isna(name_str):
         return ""
-    return re.sub(r"\s*\(\d+\)", "", str(name_str)).strip()
+    return normalize_author_display_name(name_str)
+
+def normalize_author_display_name(name_str):
+    if pd.isna(name_str):
+        return ""
+    text = str(name_str).replace("\u00a0", " ")
+    text = text.replace("，", ",")
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s*\([\d,\s]+\)\s*$", "", text)
+    text = re.sub(r"\s*,\s*", ", ", text)
+    return text.strip(" ;；")
+
+def author_match_parts(name_str):
+    text = normalize_author_display_name(name_str)
+    if not text:
+        return "", ""
+    if "," in text:
+        last, given = text.split(",", 1)
+    else:
+        tokens = text.split()
+        last = tokens[-1] if tokens else text
+        given = " ".join(tokens[:-1])
+    last_key = re.sub(r"[^a-z0-9]", "", last.lower())
+    given_tokens = re.findall(r"[A-Za-z0-9]+", given)
+    initials = []
+    for token in given_tokens:
+        if token.isupper() and len(token) <= 4:
+            initials.append(token.lower())
+        else:
+            initials.append(token[:1].lower())
+    return last_key, "".join(initials)
+
+def normalize_author_match_key(name_str):
+    last_key, initials = author_match_parts(name_str)
+    if not last_key:
+        return ""
+    return f"{last_key}|{initials}"
+
+def normalize_author_last_key(name_str):
+    return author_match_parts(name_str)[0]
 
 def normalize_date(d1, d2=""):
     s = f"{d1} {d2}".strip()
@@ -159,15 +198,48 @@ def match_author_affiliations(auth_entry, aff_dict, master_aff_list):
             indices.append(aff_dict[aff_name])
     return sorted(list(set(indices)))
 
+def split_scopus_author_affiliation_entries(auth_with_aff_str):
+    if pd.isna(auth_with_aff_str):
+        return []
+    text = str(auth_with_aff_str).strip()
+    if not text or text.lower() == "nan":
+        return []
+    entries = []
+    current = []
+    depth = 0
+    for char in text:
+        if char == "(":
+            depth += 1
+        elif char == ")" and depth > 0:
+            depth -= 1
+        if char in ";；" and depth == 0:
+            entry = "".join(current).strip()
+            if entry:
+                entries.append(entry)
+            current = []
+            continue
+        current.append(char)
+    entry = "".join(current).strip()
+    if entry:
+        entries.append(entry)
+    return entries
+
+def affiliations_from_scopus_author_entry(entry):
+    entry = str(entry or "").strip()
+    if not entry:
+        return []
+    match = re.match(r"^.+?\((.*)\)\s*$", entry)
+    if match:
+        return split_semicolon_values(match.group(1))
+    parts = entry.split(",", 1)
+    return [parts[1].strip()] if len(parts) > 1 and parts[1].strip() else []
+
 def extract_scopus_affiliations_from_authors(auth_with_aff_str):
     affiliations = []
-    for entry in split_semicolon_values(auth_with_aff_str):
-        parts = entry.split(",", 1)
-        if len(parts) < 2:
-            continue
-        aff = parts[1].strip()
-        if aff and aff not in affiliations:
-            affiliations.append(aff)
+    for entry in split_scopus_author_affiliation_entries(auth_with_aff_str):
+        for aff in affiliations_from_scopus_author_entry(entry):
+            if aff and aff not in affiliations:
+                affiliations.append(aff)
     return affiliations
 
 def format_indexed_affiliations(affiliations):
@@ -370,7 +442,7 @@ def process_scopus_row(row):
         full_names = [clean_name_keep_full(x) for x in str(full_names_str).split(";")]
 
     auth_with_aff_str = safe_get(row, ["Authors with affiliations", "作者(包含单位)", "作者(包含机构)", "Authors with Affiliations", "带归属机构的作者"])
-    auth_entries = str(auth_with_aff_str).split(";") if auth_with_aff_str else []
+    auth_entries = split_scopus_author_affiliation_entries(auth_with_aff_str)
     if not master_aff_list and auth_with_aff_str:
         master_aff_list = extract_scopus_affiliations_from_authors(auth_with_aff_str)
         aff_dict = {aff: idx + 1 for idx, aff in enumerate(master_aff_list)}
@@ -460,11 +532,12 @@ def process_wos_row(row):
     wos_cat = safe_get(row, ["WoS Categories", "Web of Science Categories", "WC", "Subject Category"])
     wos_index = normalize_wos_index(safe_get(row, ["Web of Science Index", "WOS Index", "WoS Index", "Index"]))
 
-    authors_af = safe_get(row, ["Authors", "AU", "Author Full Names", "AF", "作者(全名)", "作者全名"])
-    if not authors_af:
-        authors_af = safe_get(row, ["作者"])
-    
-    af_list = [x.strip() for x in str(authors_af).split(';')] if authors_af else []
+    authors_full = safe_get(row, ["Author Full Names", "AF", "作者(全名)", "作者全名"])
+    authors_short = safe_get(row, ["Authors", "AU", "作者"])
+    authors_af = authors_full or authors_short
+
+    af_list = [normalize_author_display_name(x) for x in str(authors_af).split(';')] if authors_af else []
+    af_list = [author for author in af_list if author]
     first_author = af_list[0] if af_list else ""
 
     addresses = safe_get(row, ["Addresses", "C1", "作者单位"])
@@ -487,20 +560,34 @@ def process_wos_row(row):
                 affil_idx = affil_list.index(affil) + 1
                 
                 for au in authors_in_bracket.split(';'):
-                    au = au.strip().lower()
-                    if au not in author_affil_map:
-                        author_affil_map[au] = []
-                    author_affil_map[au].append(affil_idx)
+                    au_key = normalize_author_match_key(au)
+                    if not au_key:
+                        continue
+                    if au_key not in author_affil_map:
+                        author_affil_map[au_key] = []
+                    author_affil_map[au_key].append(affil_idx)
+
+            last_name_affil_map = {}
+            last_name_conflicts = set()
+            for authors_in_bracket, _ in matches:
+                for au in authors_in_bracket.split(';'):
+                    au_key = normalize_author_match_key(au)
+                    last_key = normalize_author_last_key(au)
+                    if not au_key or not last_key:
+                        continue
+                    indices = tuple(sorted(set(author_affil_map.get(au_key, []))))
+                    if last_key in last_name_affil_map and last_name_affil_map[last_key] != indices:
+                        last_name_conflicts.add(last_key)
+                    else:
+                        last_name_affil_map[last_key] = indices
             
             fmt_aus = []
             for au in af_list:
-                au_lower = au.lower()
-                indices = author_affil_map.get(au_lower)
-                if not indices:
-                    for k, v in author_affil_map.items():
-                        if k in au_lower or au_lower in k:
-                            indices = v
-                            break
+                au_key = normalize_author_match_key(au)
+                indices = author_affil_map.get(au_key)
+                last_key = normalize_author_last_key(au)
+                if not indices and last_key and last_key not in last_name_conflicts:
+                    indices = list(last_name_affil_map.get(last_key, ()))
                 if indices:
                     idx_str = ",".join(map(str, sorted(set(indices))))
                     fmt_aus.append(f"{au} ({idx_str})")
@@ -512,12 +599,17 @@ def process_wos_row(row):
             
             first_author_aff = affil_list[0] if affil_list else ""
             if af_list:
-                first_au_lower = af_list[0].lower()
-                for k, v in author_affil_map.items():
-                    if k in first_au_lower or first_au_lower in k:
-                        if v:
-                            first_author_aff = affil_list[v[0]-1]
-                        break
+                first_key = normalize_author_match_key(af_list[0])
+                first_indices = author_affil_map.get(first_key)
+                first_last_key = normalize_author_last_key(af_list[0])
+                if not first_indices and first_last_key and first_last_key not in last_name_conflicts:
+                    first_indices = list(last_name_affil_map.get(first_last_key, ()))
+                if first_indices:
+                    first_author_aff = "; ".join(
+                        affil_list[idx - 1]
+                        for idx in sorted(set(first_indices))
+                        if 0 < idx <= len(affil_list)
+                    )
     else:
         if addresses:
             first_author_aff = addresses.split(';')[0].strip()

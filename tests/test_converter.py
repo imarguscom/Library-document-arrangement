@@ -12,7 +12,9 @@ from converter import (
     normalize_wos_index,
     process_ei_row,
     process_scopus_row,
+    process_wos_row,
     read_normal_csv_robust,
+    split_scopus_author_affiliation_entries,
 )
 
 
@@ -86,6 +88,87 @@ def test_process_scopus_row_extracts_multiple_corresponding_authors():
     assert record["通讯作者"] == "Han, Ting; Tang, Ben Zhong"
     assert record["通讯作者单位"] == "Shenzhen University, China; CUHK-Shenzhen, China"
     assert "B.Z. Tang" not in record["通讯作者单位"]
+
+
+def test_process_scopus_row_handles_frontend_parenthesized_affiliations():
+    row = pd.Series(
+        {
+            "DOI": "10.1093/aje/kwae220",
+            "Title": "Scopus Frontend Affiliation Test",
+            "Author full names": (
+                "Ali, Sheikh Taslim; Wang, Lin; Xu, Xiao Ke; Du, Zhanwei; Cowling, Benjamin J."
+            ),
+            "Affiliations": (
+                "University of Cambridge, Cambridge, United Kingdom; "
+                "The University of Hong Kong Li Ka Shing Faculty of Medicine, Hong Kong, Hong Kong; "
+                "Dalian Minzu University, Dalian, China; "
+                "Laboratory of Data Discovery for Health, Hong Kong, China"
+            ),
+            "Authors with affiliations": (
+                "Ali S.T. (The University of Hong Kong Li Ka Shing Faculty of Medicine, Hong Kong, Hong Kong; "
+                "Laboratory of Data Discovery for Health, Hong Kong, China); "
+                "Wang L. (University of Cambridge, Cambridge, United Kingdom); "
+                "Xu X.K. (Dalian Minzu University, Dalian, China); "
+                "Du Z. (The University of Hong Kong Li Ka Shing Faculty of Medicine, Hong Kong, Hong Kong; "
+                "Laboratory of Data Discovery for Health, Hong Kong, China); "
+                "Cowling B.J. (The University of Hong Kong Li Ka Shing Faculty of Medicine, Hong Kong, Hong Kong; "
+                "Laboratory of Data Discovery for Health, Hong Kong, China)"
+            ),
+            "EID": "2-s2.0-test",
+        }
+    )
+
+    entries = split_scopus_author_affiliation_entries(row["Authors with affiliations"])
+    record = process_scopus_row(row)
+
+    assert len(entries) == 5
+    assert "Ali, Sheikh Taslim(2,4)" in record["作者"]
+    assert "Wang, Lin(1)" in record["作者"]
+    assert "Xu, Xiao Ke(3)" in record["作者"]
+    assert "Cowling, Benjamin J.(2,4)" in record["作者"]
+    assert record["第一作者单位"] == (
+        "The University of Hong Kong Li Ka Shing Faculty of Medicine, Hong Kong, Hong Kong; "
+        "Laboratory of Data Discovery for Health, Hong Kong, China"
+    )
+
+
+def test_process_wos_row_matches_frontend_full_names_to_addresses():
+    row = pd.Series(
+        {
+            "DOI": "10.1093/aje/kwae220",
+            "Article Title": "WOS Frontend Affiliation Test",
+            "Authors": "Ali, ST; Wang, L; Xu, XK; Wu, P; Cowling, BJ",
+            "Author Full Names": (
+                "Ali, Sheikh Taslim; Wang, Lin; Xu, Xiao-Ke; Wu, Peng; Cowling, Benjamin J."
+            ),
+            "Addresses": (
+                "[Ali, Sheikh Taslim; Wu, Peng; Cowling, Benjamin J.] "
+                "Univ Hong Kong, Sch Publ Hlth, Hong Kong, Peoples R China; "
+                "[Ali, Sheikh Taslim; Wu, Peng; Cowling, Benjamin J.] "
+                "Lab Data Discovery Hlth Ltd, Hong Kong, Peoples R China; "
+                "[Wang, Lin] Univ Cambridge, Cambridge, England; "
+                "[Xu, Xiao-Ke] Dalian Minzu Univ, Dalian, Peoples R China"
+            ),
+            "Reprint Addresses": (
+                "Cowling, BJ (corresponding author), Univ Hong Kong, Sch Publ Hlth, Hong Kong, Peoples R China."
+            ),
+            "Source Title": "American Journal of Epidemiology",
+            "Web of Science Index": "Science Citation Index Expanded (SCI-EXPANDED)",
+        }
+    )
+
+    record = process_wos_row(row)
+
+    assert "Ali, Sheikh Taslim (1,2)" in record["作者"]
+    assert "Wang, Lin (3)" in record["作者"]
+    assert "Xu, Xiao-Ke (4)" in record["作者"]
+    assert "Wu, Peng (1,2)" in record["作者"]
+    assert "Cowling, Benjamin J. (1,2)" in record["作者"]
+    assert record["第一作者单位"] == (
+        "Univ Hong Kong, Sch Publ Hlth, Hong Kong, Peoples R China; "
+        "Lab Data Discovery Hlth Ltd, Hong Kong, Peoples R China"
+    )
+    assert record["通讯作者"] == "Cowling, Benjamin J."
 
 
 def test_process_scopus_row_normalizes_keywords():

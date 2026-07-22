@@ -1,5 +1,5 @@
 const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/";
-const APP_VERSION = "20260722-keyword-semicolon";
+const APP_VERSION = "20260722-affiliation-match";
 const MODULE_FILES = ["claim_mapping.py", "scope_rules.py", "converter.py"];
 
 const els = {
