@@ -93,6 +93,15 @@ def translate_language(lang_str):
             return chn
     return str(lang_str).strip()
 
+def normalize_keywords(keyword_text):
+    if pd.isna(keyword_text):
+        return ""
+    text = str(keyword_text).strip()
+    if not text or text.lower() == "nan":
+        return ""
+    parts = [part.strip() for part in re.split(r"\s*(?:\||;|；|\n|\r)\s*", text) if part.strip()]
+    return "; ".join(parts)
+
 def normalize_wos_index(index_text):
     text = str(index_text or "").strip()
     if not text or text.lower() == "nan":
@@ -423,7 +432,7 @@ def process_scopus_row(row):
         "期号": safe_get(row, ["Issue", "期"]),
         "页码": page_val,
         "摘要": safe_get(row, ["Abstract", "摘要"]),
-        "关键词": safe_get(row, ["Author Keywords", "作者关键词", "作者关键字"]),
+        "关键词": normalize_keywords(safe_get(row, ["Author Keywords", "作者关键词", "作者关键字", "关键词"])),
         "URL": safe_get(row, ["Link", "链接"]),
         "收录类别": "SCOPUS",
         "语种": lang,
@@ -650,6 +659,11 @@ def merge_records(existing, new_data):
             else:
                 existing[key] = sval
             continue
+
+        if key == "关键词":
+            val = normalize_keywords(sval)
+            if not val:
+                continue
 
         if key not in existing or not existing[key] or str(existing[key]) in ["nan", "nan-nan", "-"]:
             existing[key] = val

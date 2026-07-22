@@ -6,7 +6,14 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from converter import normalize_doi, normalize_wos_index, process_ei_row, process_scopus_row, read_normal_csv_robust
+from converter import (
+    normalize_doi,
+    normalize_keywords,
+    normalize_wos_index,
+    process_ei_row,
+    process_scopus_row,
+    read_normal_csv_robust,
+)
 
 
 def test_normalize_doi_strips_prefix_and_spaces():
@@ -24,6 +31,14 @@ def test_normalize_wos_index_preserves_multiple_indexes():
     )
 
     assert normalize_wos_index(raw) == "SCIE; CPCI-S; SSCI; A&HCI; ESCI; BKCI"
+
+
+def test_normalize_keywords_uses_english_semicolon_separator():
+    raw = "speech processing | audio anti-spoofing|deep learning； pattern recognition\nbiometrics"
+
+    assert normalize_keywords(raw) == (
+        "speech processing; audio anti-spoofing; deep learning; pattern recognition; biometrics"
+    )
 
 
 def test_process_ei_row_keeps_author_and_affiliation_fields():
@@ -71,6 +86,21 @@ def test_process_scopus_row_extracts_multiple_corresponding_authors():
     assert record["通讯作者"] == "Han, Ting; Tang, Ben Zhong"
     assert record["通讯作者单位"] == "Shenzhen University, China; CUHK-Shenzhen, China"
     assert "B.Z. Tang" not in record["通讯作者单位"]
+
+
+def test_process_scopus_row_normalizes_keywords():
+    row = pd.Series(
+        {
+            "DOI": "10.1/keywords",
+            "Title": "Keyword Test",
+            "Author Keywords": "speech processing | audio anti-spoofing|deep learning",
+            "EID": "2-s2.0-keyword",
+        }
+    )
+
+    record = process_scopus_row(row)
+
+    assert record["关键词"] == "speech processing; audio anti-spoofing; deep learning"
 
 
 def test_read_normal_csv_detects_semicolon_separator():
