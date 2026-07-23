@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>文献数据合并与博文阁导入工具</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script defer src="https://cdn.jsdelivr.net/pyodide/v0.28.3/full/pyodide.js"></script>
+    <script defer src="./app.js?v=20260723-author-merge"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel">
+        <div class="header">
+          <div>
+            <h1>文献数据合并与博文阁导入工具</h1>
+            <p>Scopus / WOS / EI 文件合并、清洗、去重并导出 Excel。</p>
+          </div>
+          <div id="runtimeStatus" class="status">未加载</div>
+        </div>
+
+        <div class="grid">
+          <label class="field wide">
+            <span>数据文件</span>
+            <input id="dataFiles" type="file" multiple accept=".xlsx,.xls,.csv,.txt" />
+          </label>
+
+          <fieldset class="field mode">
+            <legend>成果类型</legend>
+            <label><input type="radio" name="mode" value="local" checked /> 本校成果</label>
+            <label><input type="radio" name="mode" value="external" /> 校外成果</label>
+          </fieldset>
+
+          <label class="field">
+            <span>账户表</span>
+            <input id="accountFile" type="file" accept=".xlsx,.xls,.csv" />
+          </label>
+
+          <label class="field">
+            <span>文章库</span>
+            <input id="articleFile" type="file" accept=".xlsx,.xls,.csv" />
+          </label>
+
+          <label class="field">
+            <span>学者别名表</span>
+            <input id="aliasFile" type="file" accept=".xlsx,.xls,.csv" />
+          </label>
+
+          <label class="field">
+            <span>Scopus API Key</span>
+            <input id="apiKey" type="password" autocomplete="off" />
+          </label>
+
+          <label class="field wide">
+            <span>限定作品认领匹配邮箱</span>
+            <textarea id="claimEmailFilter" rows="3" placeholder="可选，仅校外成果生效；teacher1@cuhk.edu.cn; teacher2@cuhk.edu.cn"></textarea>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="runButton" type="button">开始处理</button>
+          <a id="downloadXlsx" class="button secondary disabled" download="博文阁导入_文献数据合并.xlsx">下载 Excel</a>
+          <a id="downloadCsv" class="button secondary disabled" download="博文阁导入_全部数据.csv">下载 CSV</a>
+        </div>
+      </section>
+
+      <section class="panel results">
+        <div class="metrics" id="metrics"></div>
+        <pre id="log" aria-live="polite"></pre>
+      </section>
+    </main>
+  </body>
+</html>
