@@ -7,6 +7,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from converter import (
+    merge_records,
     normalize_doi,
     normalize_keywords,
     normalize_wos_index,
@@ -169,6 +170,27 @@ def test_process_wos_row_matches_frontend_full_names_to_addresses():
         "Lab Data Discovery Hlth Ltd, Hong Kong, Peoples R China"
     )
     assert record["通讯作者"] == "Cowling, Benjamin J."
+
+
+def test_merge_records_prefers_author_text_with_more_affiliation_markers():
+    existing = {
+        "DOI": "10.1109/lmwt.2026.3659596",
+        "作者": "Liu, Junyi; Blu, Thierry; Wu, Ke-Li",
+        "作者单位": "",
+        "来源库": "WOS",
+    }
+    new_data = {
+        "DOI": "10.1109/lmwt.2026.3659596",
+        "作者": "Liu, Junyi(1); Blu, Thierry(1); Wu, Ke Li(1)",
+        "作者单位": "(1) Chinese University of Hong Kong, Hong Kong, Hong Kong",
+        "来源库": "SCOPUS",
+    }
+
+    merged = merge_records(existing, new_data)
+
+    assert merged["作者"] == "Liu, Junyi(1); Blu, Thierry(1); Wu, Ke Li(1)"
+    assert merged["作者单位"] == "(1) Chinese University of Hong Kong, Hong Kong, Hong Kong"
+    assert merged["来源库"] == "WOS; SCOPUS"
 
 
 def test_process_scopus_row_normalizes_keywords():

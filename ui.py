@@ -734,6 +734,13 @@ def process_ei_row(row):
         "来源库": "EI",
     }
 
+def count_author_affiliation_markers(author_text):
+    text = str(author_text or "")
+    if not text or text.lower() == "nan":
+        return 0
+    return len(re.findall(r"\(\d+(?:,\d+)*\)", text))
+
+
 def merge_records(existing, new_data):
     for key, val in new_data.items():
         if key == "DOI":
@@ -756,6 +763,15 @@ def merge_records(existing, new_data):
             val = normalize_keywords(sval)
             if not val:
                 continue
+
+        if key == "作者":
+            existing_marker_count = count_author_affiliation_markers(existing.get(key, ""))
+            new_marker_count = count_author_affiliation_markers(val)
+            if new_marker_count > existing_marker_count:
+                existing[key] = val
+            elif key not in existing or not existing[key] or str(existing[key]) in ["nan", "nan-nan", "-"]:
+                existing[key] = val
+            continue
 
         if key not in existing or not existing[key] or str(existing[key]) in ["nan", "nan-nan", "-"]:
             existing[key] = val
