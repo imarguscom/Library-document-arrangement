@@ -680,26 +680,32 @@ def order_output_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[front + rest]
 
 
-def is_conference_record(row) -> bool:
+def _document_type_tokens(row) -> list[str]:
     doc_type = str(row.get("原始文献类型", "") or "").strip().lower()
-    journal = str(row.get("发表期刊", "") or "").strip().lower()
-    text = f"{doc_type} {journal}"
-    conference_markers = [
-        "conference",
-        "proceeding",
-        "proceedings",
-        "meeting",
-        "symposium",
-        "workshop",
-        "会议",
-        "ca)",
+    if not doc_type or doc_type in {"nan", "none"}:
+        return []
+    return [
+        token.strip()
+        for token in re.split(r"[;；,/]+", doc_type)
+        if token.strip()
     ]
-    return any(marker in text for marker in conference_markers)
+
+
+def is_conference_record(row) -> bool:
+    tokens = _document_type_tokens(row)
+    return any(re.search(r"\bpaper\b", token) or "会议论文" in token for token in tokens)
+
+
+def is_article_record(row) -> bool:
+    if is_conference_record(row):
+        return False
+    ignored_status_tokens = {"early access", "online", "online first", "in press"}
+    tokens = [token for token in _document_type_tokens(row) if token not in ignored_status_tokens]
+    return len(tokens) == 1 and tokens[0] in {"article", "journal article", "期刊论文"}
 
 
 def is_review_record(row) -> bool:
-    doc_type = str(row.get("原始文献类型", "") or "").strip().lower()
-    return "review" in doc_type or "综述" in doc_type
+    return not is_conference_record(row) and not is_article_record(row)
 
 
 def split_output_frames(df: pd.DataFrame) -> dict:

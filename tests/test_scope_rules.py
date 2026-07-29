@@ -116,16 +116,27 @@ def test_split_output_frames_separates_article_conference_and_review():
     df = pd.DataFrame(
         [
             {"题名": "Article", "原始文献类型": "Article", "数据归属": "本校"},
+            {"题名": "Article Early Access", "原始文献类型": "Article; Early Access", "数据归属": "本校"},
+            {
+                "题名": "Proceedings Source Article",
+                "原始文献类型": "Article",
+                "发表期刊": "Proceedings of Test Journal",
+                "数据归属": "本校",
+            },
             {"题名": "Conference", "原始文献类型": "Conference paper", "数据归属": "本校"},
+            {"题名": "Proceedings", "原始文献类型": "Article; Proceedings Paper", "数据归属": "本校"},
             {"题名": "Review", "原始文献类型": "Review; Early Access", "数据归属": "本校"},
+            {"题名": "Editorial", "原始文献类型": "Editorial", "数据归属": "本校"},
+            {"题名": "Erratum", "原始文献类型": "Erratum", "数据归属": "本校"},
+            {"题名": "Blank", "原始文献类型": "", "数据归属": "本校"},
         ]
     )
 
     frames = split_output_frames(df)
 
-    assert frames["期刊论文"]["题名"].tolist() == ["Article"]
-    assert frames["会议论文"]["题名"].tolist() == ["Conference"]
-    assert frames["综述论文"]["题名"].tolist() == ["Review"]
+    assert frames["期刊论文"]["题名"].tolist() == ["Article", "Article Early Access", "Proceedings Source Article"]
+    assert frames["会议论文"]["题名"].tolist() == ["Conference", "Proceedings"]
+    assert frames["综述论文"]["题名"].tolist() == ["Review", "Editorial", "Erratum", "Blank"]
 
 
 def test_default_scholar_author_name_forms_structure_can_be_read():
