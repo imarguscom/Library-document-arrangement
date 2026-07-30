@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# pytest
+.pytest_cache/
+.cache/
+
+# Output files (generated)
+*.xls
+!samples/*.xls
+outputs/
+external_audit/
+*.zip
+*.xlsx
+!samples/*.xlsx
+src/*.csv
+src/*.xlsx
+src/*.docx
+lib.zip
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.venv/
+__pycache__/
+build/
+dist/
+*.spec
+*.exe
