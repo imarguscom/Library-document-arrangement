@@ -33,7 +33,7 @@ def test_normalize_wos_index_preserves_multiple_indexes():
         "Book Citation Index (BKCI)"
     )
 
-    assert normalize_wos_index(raw) == "SCIE; CPCI-S; SSCI; A&HCI; ESCI; BKCI"
+    assert normalize_wos_index(raw) == "SCIE; CPCI-S; SSCI; AHCI; ESCI; BKCI"
 
 
 def test_normalize_keywords_uses_english_semicolon_separator():

@@ -1,5 +1,5 @@
 const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/";
-const APP_VERSION = "20260729-doc-type-split";
+const APP_VERSION = "20260730-ahci";
 const MODULE_FILES = ["claim_mapping.py", "scope_rules.py", "converter.py"];
 
 const els = {
