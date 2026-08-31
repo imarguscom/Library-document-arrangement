@@ -744,7 +744,7 @@ def split_output_frames(df: pd.DataFrame) -> dict:
     df.loc[document_type_conflict_mask, DOCUMENT_TYPE_AUDIT_COLUMN] = (
         "同一 DOI 的来源文献类型冲突：同时包含会议类与 Article/Review，请人工核验。"
     )
-    exportable_mask = ~conference_mask
+    exportable_mask = ~document_type_conflict_mask
     included_df = df.loc[exportable_mask].copy()
     email = df["本校学者邮箱"].fillna("").astype(str).str.strip()
     matched = df["本校学者匹配"].fillna("").astype(str).str.strip()
@@ -760,9 +760,11 @@ def split_output_frames(df: pd.DataFrame) -> dict:
     scope_pending_mask = exportable_mask & (df["数据归属"] == "校外") & ((email == "") | (matched == "待确认"))
     pending_df = df.loc[scope_pending_mask | document_type_conflict_mask].copy()
     journal_df = included_df[included_df.apply(is_article_record, axis=1)]
+    conference_df = included_df[included_df.apply(is_conference_record, axis=1)]
     return {
         "全部数据": included_df,
         "期刊论文": journal_df,
+        "会议论文": conference_df,
         "本校成果": local_df,
         "校外成果": external_ready_df,
         "待确认": pending_df,
