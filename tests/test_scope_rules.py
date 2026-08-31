@@ -105,8 +105,7 @@ def test_excel_output_contains_expected_sheets(tmp_path):
     output = tmp_path / "out.xlsx"
     counts = write_multi_sheet_excel(output_df, output)
     sheets = pd.ExcelFile(output).sheet_names
-    assert {"全部数据", "期刊论文", "本校成果", "校外成果", "待确认"}.issubset(set(sheets))
-    assert "会议论文" not in sheets
+    assert {"全部数据", "期刊论文", "会议论文", "本校成果", "校外成果", "待确认"}.issubset(set(sheets))
     assert "综述论文" not in sheets
     assert counts["全部数据"] == 3
     assert counts["本校成果"] == 1
@@ -140,6 +139,7 @@ def test_split_output_frames_excludes_conference_and_keeps_review_with_articles(
         "Article",
         "Article Early Access",
         "Proceedings Source Article",
+        "Conference",
         "Review",
         "Editorial",
         "Erratum",
@@ -154,7 +154,7 @@ def test_split_output_frames_excludes_conference_and_keeps_review_with_articles(
     ]
     assert frames["待确认"]["题名"].tolist() == ["Proceedings"]
     assert "来源文献类型冲突" in frames["待确认"].iloc[0]["文献类型审核原因"]
-    assert "会议论文" not in frames
+    assert frames["会议论文"]["题名"].tolist() == ["Conference"]
     assert "综述论文" not in frames
 
 
