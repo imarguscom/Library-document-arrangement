@@ -755,6 +755,22 @@ def count_author_affiliation_markers(author_text):
 
 
 # 合并
+def merge_document_types(existing_value, new_value) -> str:
+    """Combine source document types so classification survives DOI merging."""
+    values = []
+    seen = set()
+    for raw_value in (existing_value, new_value):
+        for value in re.split(r"[;；,/]+", str(raw_value or "")):
+            value = value.strip()
+            if not value or value.lower() in {"nan", "none"}:
+                continue
+            normalized = value.lower()
+            if normalized not in seen:
+                seen.add(normalized)
+                values.append(value)
+    return "; ".join(values)
+
+
 def merge_records(existing, new_data):
     for key, val in new_data.items():
         if key == "DOI":
@@ -763,6 +779,10 @@ def merge_records(existing, new_data):
             continue
         sval = str(val)
         if not sval or sval == "nan":
+            continue
+
+        if key == "原始文献类型":
+            existing[key] = merge_document_types(existing.get(key, ""), sval)
             continue
 
         if key in ["收录类别", "来源库", "WOS记录号", "WOS研究方向", "WOS类目"]:

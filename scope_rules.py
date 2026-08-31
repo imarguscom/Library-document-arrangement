@@ -693,41 +693,56 @@ def _document_type_tokens(row) -> list[str]:
 
 def is_conference_record(row) -> bool:
     tokens = _document_type_tokens(row)
-    return any(re.search(r"\bpaper\b", token) or "会议论文" in token for token in tokens)
+    conference_patterns = (
+        r"\bconference(?:\s+(?:paper|proceeding|abstract))?\b",
+        r"\bproceedings?(?:\s+paper)?\b",
+        r"\bworkshop(?:\s+paper)?\b",
+        r"\bsymposium(?:\s+paper)?\b",
+        r"\bmeeting(?:\s+paper)?\b",
+    )
+    return any(
+        "会议论文" in token
+        or "会议摘要" in token
+        or any(re.search(pattern, token) for pattern in conference_patterns)
+        for token in tokens
+    )
 
 
 def is_article_record(row) -> bool:
+    """Return whether a record belongs in the journal-article export."""
     if is_conference_record(row):
         return False
     ignored_status_tokens = {"early access", "online", "online first", "in press"}
+    article_tokens = {"article", "journal article", "期刊论文"}
+    review_tokens = {"review", "review article", "综述", "综述论文"}
     tokens = [token for token in _document_type_tokens(row) if token not in ignored_status_tokens]
-    return len(tokens) == 1 and tokens[0] in {"article", "journal article", "期刊论文"}
+    return any(token in article_tokens or token in review_tokens for token in tokens)
 
 
 def is_review_record(row) -> bool:
-    return not is_conference_record(row) and not is_article_record(row)
+    return any(
+        token in {"review", "review article", "综述", "综述论文"}
+        for token in _document_type_tokens(row)
+    )
 
 
 def split_output_frames(df: pd.DataFrame) -> dict:
+    df = df.copy()
     for col in [CLAIM_COLUMN, *SCOPE_COLUMNS]:
         if col not in df.columns:
             df[col] = ""
-    email = df["本校学者邮箱"].fillna("").astype(str).str.strip()
-    matched = df["本校学者匹配"].fillna("").astype(str).str.strip()
-    local_df = df[df["数据归属"] == "本校"]
-    external_ready_df = df[(df["数据归属"] == "校外") & (email != "")]
-    needs_email_df = df[(df["数据归属"] == "校外") & (email == "") & (matched != "") & (matched != "待确认")]
-    pending_df = df[(df["数据归属"] == "校外") & ((email == "") | (matched == "待确认"))]
-    review_mask = df.apply(is_review_record, axis=1)
-    conference_mask = df.apply(is_conference_record, axis=1) & ~review_mask
-    conference_df = df[conference_mask]
-    review_df = df[review_mask]
-    journal_df = df[~conference_mask & ~review_mask]
+    conference_mask = df.apply(is_conference_record, axis=1)
+    included_df = df.loc[~conference_mask].copy()
+    email = included_df["本校学者邮箱"].fillna("").astype(str).str.strip()
+    matched = included_df["本校学者匹配"].fillna("").astype(str).str.strip()
+    local_df = included_df[included_df["数据归属"] == "本校"]
+    external_ready_df = included_df[(included_df["数据归属"] == "校外") & (email != "")]
+    needs_email_df = included_df[(included_df["数据归属"] == "校外") & (email == "") & (matched != "") & (matched != "待确认")]
+    pending_df = included_df[(included_df["数据归属"] == "校外") & ((email == "") | (matched == "待确认"))]
+    journal_df = included_df[included_df.apply(is_article_record, axis=1)]
     return {
-        "全部数据": df,
+        "全部数据": included_df,
         "期刊论文": journal_df,
-        "会议论文": conference_df,
-        "综述论文": review_df,
         "本校成果": local_df,
         "校外成果": external_ready_df,
         "待确认": pending_df,
