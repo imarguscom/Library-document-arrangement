@@ -194,7 +194,7 @@ def test_merge_records_prefers_author_text_with_more_affiliation_markers():
     assert merged["来源库"] == "WOS; SCOPUS"
 
 
-def test_run_conversion_excludes_conference_when_duplicate_is_merged_article_first(tmp_path):
+def test_run_conversion_routes_article_conference_type_conflict_to_pending_review(tmp_path):
     doi = "10.1000/article-first-conference-second"
     wos_path = tmp_path / "wos.xlsx"
     scopus_path = tmp_path / "scopus.xlsx"
@@ -229,6 +229,10 @@ def test_run_conversion_excludes_conference_when_duplicate_is_merged_article_fir
 
     all_records = pd.read_excel(output_path, sheet_name="全部数据", dtype=str)
     assert all_records.empty
+    pending_records = pd.read_excel(output_path, sheet_name="待确认", dtype=str).fillna("")
+    assert pending_records["DOI"].tolist() == [doi]
+    assert pending_records["原始文献类型"].tolist() == ["Article; Conference Paper"]
+    assert "来源文献类型冲突" in pending_records.loc[0, "文献类型审核原因"]
 
 
 def test_process_scopus_row_normalizes_keywords():

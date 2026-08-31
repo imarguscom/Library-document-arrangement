@@ -102,7 +102,7 @@ python3 converter.py outputs/result.xlsx --external \
 | `期刊论文` | Article 与 Review 类型记录；`Review` 按期刊论文处理 |
 | `本校成果` | 本校成果模式或判定为本校的记录 |
 | `校外成果` | 校外成果模式下已匹配邮箱、可进入认领流程的记录 |
-| `待确认` | 学者匹配不明确或别名冲突的记录 |
+| `待确认` | 学者匹配不明确、别名冲突，或同一 DOI 的来源文献类型冲突的记录 |
 | `需补邮箱` | 命中本校学者但缺少可用邮箱的记录 |
 
 核心输出字段包括：
@@ -122,7 +122,7 @@ python3 converter.py outputs/result.xlsx --external \
 3. 将不同来源字段映射到统一中文字段。
 4. 标准化 DOI，并以 DOI 作为主键合并重复记录。
 5. 合并来源库、收录类别、数据库记录号和引用指标。
-6. 剔除 Conference paper、Proceedings paper、workshop 等会议类记录；`Review` 保留在期刊论文中。
+6. 剔除 Conference paper、Proceedings paper、workshop 等会议类记录；若同一 DOI 同时被标记为会议类与 Article/Review，则转入 `待确认` 并标注审核原因；`Review` 保留在期刊论文中。
 7. 根据本校/校外模式补充数据归属字段。
 8. 在校外成果模式下，使用别名表、账户表和文章库匹配本校学者邮箱。
 9. 生成多 sheet Excel，便于导入前人工复核。

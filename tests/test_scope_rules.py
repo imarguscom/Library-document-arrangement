@@ -152,6 +152,8 @@ def test_split_output_frames_excludes_conference_and_keeps_review_with_articles(
         "Proceedings Source Article",
         "Review",
     ]
+    assert frames["待确认"]["题名"].tolist() == ["Proceedings"]
+    assert "来源文献类型冲突" in frames["待确认"].iloc[0]["文献类型审核原因"]
     assert "会议论文" not in frames
     assert "综述论文" not in frames
 
