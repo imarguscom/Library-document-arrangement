@@ -235,6 +235,71 @@ def test_run_conversion_routes_article_conference_type_conflict_to_pending_revie
     assert "来源文献类型冲突" in pending_records.loc[0, "文献类型审核原因"]
 
 
+def test_run_conversion_supports_each_source_as_the_only_input(tmp_path):
+    alias_path = tmp_path / "aliases.xlsx"
+    pd.DataFrame(columns=["别名", "姓名", "邮箱"]).to_excel(alias_path, index=False)
+    source_cases = [
+        (
+            "wos.xlsx",
+            pd.DataFrame(
+                [{
+                    "UT": "WOS:single-source",
+                    "Article Title": "Single WOS Article",
+                    "Authors": "Author, A",
+                    "DOI": "10.1000/single-wos",
+                    "Document Type": "Article",
+                }]
+            ),
+        ),
+        (
+            "scopus.xlsx",
+            pd.DataFrame(
+                [{
+                    "EID": "2-s2.0-single-source",
+                    "Title": "Single Scopus Article",
+                    "Authors": "Author, A",
+                    "DOI": "10.1000/single-scopus",
+                    "Document Type": "Article",
+                }]
+            ),
+        ),
+        (
+            "ei.csv",
+            pd.DataFrame(
+                [{
+                    "Accession number": "EI-single-source",
+                    "Classification code": "001",
+                    "Title": "Single EI Article",
+                    "Author": "Author, A",
+                    "DOI": "10.1000/single-ei",
+                    "Document type": "Article",
+                }]
+            ),
+        ),
+    ]
+
+    for filename, frame in source_cases:
+        input_path = tmp_path / filename
+        output_path = tmp_path / f"{input_path.stem}_out.xlsx"
+        if input_path.suffix == ".csv":
+            frame.to_csv(input_path, index=False)
+        else:
+            frame.to_excel(input_path, index=False)
+
+        stats = run_conversion(
+            [str(input_path)],
+            str(output_path),
+            "local",
+            alias_path=str(alias_path),
+        )
+
+        assert stats["total"] == 1
+        all_records = pd.read_excel(output_path, sheet_name="全部数据", dtype=str).fillna("")
+        journal_records = pd.read_excel(output_path, sheet_name="期刊论文", dtype=str).fillna("")
+        assert all_records["题名"].tolist() == [frame.iloc[0]["Title"] if "Title" in frame.columns else frame.iloc[0]["Article Title"]]
+        assert journal_records["DOI"].tolist() == [frame.iloc[0]["DOI"]]
+
+
 def test_process_scopus_row_normalizes_keywords():
     row = pd.Series(
         {
