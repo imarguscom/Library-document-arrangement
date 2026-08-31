@@ -25,6 +25,7 @@ from claim_mapping import (
 
 
 CLAIM_COLUMN = "作品认领"
+DOCUMENT_TYPE_AUDIT_COLUMN = "文献类型审核原因"
 SCOPE_COLUMNS = ["数据归属", "归属依据", "本校学者匹配", "本校学者邮箱", "学者匹配依据"]
 PREFERRED_FRONT_COLUMNS = ["题名", *SCOPE_COLUMNS, CLAIM_COLUMN]
 AUTHOR_FIELD_CANDIDATES = ["作者", "第一作者", "通讯作者", "已认领作者", "Author full names", "Authors", "Author"]
@@ -708,15 +709,22 @@ def is_conference_record(row) -> bool:
     )
 
 
-def is_article_record(row) -> bool:
-    """Return whether a record belongs in the journal-article export."""
-    if is_conference_record(row):
-        return False
+def has_article_or_review_type(row) -> bool:
     ignored_status_tokens = {"early access", "online", "online first", "in press"}
     article_tokens = {"article", "journal article", "期刊论文"}
     review_tokens = {"review", "review article", "综述", "综述论文"}
     tokens = [token for token in _document_type_tokens(row) if token not in ignored_status_tokens]
     return any(token in article_tokens or token in review_tokens for token in tokens)
+
+
+def has_document_type_conflict(row) -> bool:
+    """Identify a DOI that sources classify as both conference and article/review."""
+    return is_conference_record(row) and has_article_or_review_type(row)
+
+
+def is_article_record(row) -> bool:
+    """Return whether a record belongs in the journal-article export."""
+    return not is_conference_record(row) and has_article_or_review_type(row)
 
 
 def is_review_record(row) -> bool:
@@ -728,17 +736,29 @@ def is_review_record(row) -> bool:
 
 def split_output_frames(df: pd.DataFrame) -> dict:
     df = df.copy()
-    for col in [CLAIM_COLUMN, *SCOPE_COLUMNS]:
+    for col in [CLAIM_COLUMN, DOCUMENT_TYPE_AUDIT_COLUMN, *SCOPE_COLUMNS]:
         if col not in df.columns:
             df[col] = ""
     conference_mask = df.apply(is_conference_record, axis=1)
-    included_df = df.loc[~conference_mask].copy()
-    email = included_df["本校学者邮箱"].fillna("").astype(str).str.strip()
-    matched = included_df["本校学者匹配"].fillna("").astype(str).str.strip()
+    document_type_conflict_mask = df.apply(has_document_type_conflict, axis=1)
+    df.loc[document_type_conflict_mask, DOCUMENT_TYPE_AUDIT_COLUMN] = (
+        "同一 DOI 的来源文献类型冲突：同时包含会议类与 Article/Review，请人工核验。"
+    )
+    exportable_mask = ~conference_mask
+    included_df = df.loc[exportable_mask].copy()
+    email = df["本校学者邮箱"].fillna("").astype(str).str.strip()
+    matched = df["本校学者匹配"].fillna("").astype(str).str.strip()
     local_df = included_df[included_df["数据归属"] == "本校"]
-    external_ready_df = included_df[(included_df["数据归属"] == "校外") & (email != "")]
-    needs_email_df = included_df[(included_df["数据归属"] == "校外") & (email == "") & (matched != "") & (matched != "待确认")]
-    pending_df = included_df[(included_df["数据归属"] == "校外") & ((email == "") | (matched == "待确认"))]
+    external_ready_df = df.loc[exportable_mask & (df["数据归属"] == "校外") & (email != "")]
+    needs_email_df = df.loc[
+        exportable_mask
+        & (df["数据归属"] == "校外")
+        & (email == "")
+        & (matched != "")
+        & (matched != "待确认")
+    ]
+    scope_pending_mask = exportable_mask & (df["数据归属"] == "校外") & ((email == "") | (matched == "待确认"))
+    pending_df = df.loc[scope_pending_mask | document_type_conflict_mask].copy()
     journal_df = included_df[included_df.apply(is_article_record, axis=1)]
     return {
         "全部数据": included_df,
