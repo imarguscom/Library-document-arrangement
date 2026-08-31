@@ -105,14 +105,16 @@ def test_excel_output_contains_expected_sheets(tmp_path):
     output = tmp_path / "out.xlsx"
     counts = write_multi_sheet_excel(output_df, output)
     sheets = pd.ExcelFile(output).sheet_names
-    assert {"全部数据", "期刊论文", "会议论文", "综述论文", "本校成果", "校外成果", "待确认"}.issubset(set(sheets))
+    assert {"全部数据", "期刊论文", "本校成果", "校外成果", "待确认"}.issubset(set(sheets))
+    assert "会议论文" not in sheets
+    assert "综述论文" not in sheets
     assert counts["全部数据"] == 3
     assert counts["本校成果"] == 1
     assert counts["校外成果"] == 1
     assert counts["待确认"] == 1
 
 
-def test_split_output_frames_separates_article_conference_and_review():
+def test_split_output_frames_excludes_conference_and_keeps_review_with_articles():
     df = pd.DataFrame(
         [
             {"题名": "Article", "原始文献类型": "Article", "数据归属": "本校"},
@@ -134,9 +136,24 @@ def test_split_output_frames_separates_article_conference_and_review():
 
     frames = split_output_frames(df)
 
-    assert frames["期刊论文"]["题名"].tolist() == ["Article", "Article Early Access", "Proceedings Source Article"]
-    assert frames["会议论文"]["题名"].tolist() == ["Conference", "Proceedings"]
-    assert frames["综述论文"]["题名"].tolist() == ["Review", "Editorial", "Erratum", "Blank"]
+    expected_all_titles = [
+        "Article",
+        "Article Early Access",
+        "Proceedings Source Article",
+        "Review",
+        "Editorial",
+        "Erratum",
+        "Blank",
+    ]
+    assert frames["全部数据"]["题名"].tolist() == expected_all_titles
+    assert frames["期刊论文"]["题名"].tolist() == [
+        "Article",
+        "Article Early Access",
+        "Proceedings Source Article",
+        "Review",
+    ]
+    assert "会议论文" not in frames
+    assert "综述论文" not in frames
 
 
 def test_default_scholar_author_name_forms_structure_can_be_read():

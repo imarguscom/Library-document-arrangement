@@ -15,6 +15,7 @@ from converter import (
     process_scopus_row,
     process_wos_row,
     read_normal_csv_robust,
+    run_conversion,
     split_scopus_author_affiliation_entries,
 )
 
@@ -191,6 +192,43 @@ def test_merge_records_prefers_author_text_with_more_affiliation_markers():
     assert merged["作者"] == "Liu, Junyi(1); Blu, Thierry(1); Wu, Ke Li(1)"
     assert merged["作者单位"] == "(1) Chinese University of Hong Kong, Hong Kong, Hong Kong"
     assert merged["来源库"] == "WOS; SCOPUS"
+
+
+def test_run_conversion_excludes_conference_when_duplicate_is_merged_article_first(tmp_path):
+    doi = "10.1000/article-first-conference-second"
+    wos_path = tmp_path / "wos.xlsx"
+    scopus_path = tmp_path / "scopus.xlsx"
+    alias_path = tmp_path / "aliases.xlsx"
+    output_path = tmp_path / "out.xlsx"
+    pd.DataFrame(
+        [{
+            "UT": "WOS:000001",
+            "Article Title": "Article-first duplicate",
+            "Authors": "Author, A",
+            "DOI": doi,
+            "Document Type": "Article",
+        }]
+    ).to_excel(wos_path, index=False)
+    pd.DataFrame(
+        [{
+            "EID": "2-s2.0-conference",
+            "Title": "Conference-second duplicate",
+            "Authors": "Author, A",
+            "DOI": doi,
+            "Document Type": "Conference Paper",
+        }]
+    ).to_excel(scopus_path, index=False)
+    pd.DataFrame(columns=["别名", "姓名", "邮箱"]).to_excel(alias_path, index=False)
+
+    run_conversion(
+        [str(wos_path), str(scopus_path)],
+        str(output_path),
+        "local",
+        alias_path=str(alias_path),
+    )
+
+    all_records = pd.read_excel(output_path, sheet_name="全部数据", dtype=str)
+    assert all_records.empty
 
 
 def test_process_scopus_row_normalizes_keywords():

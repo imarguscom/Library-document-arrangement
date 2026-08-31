@@ -24,7 +24,7 @@ def _save_uploaded_file(uploaded_file, directory: Path) -> str:
 def _read_preview_frames(output_path: str):
     xl = pd.ExcelFile(output_path)
     frames = {}
-    for sheet in ["全部数据", "期刊论文", "会议论文", "综述论文", "校外成果", "待确认", "需补邮箱"]:
+    for sheet in ["全部数据", "期刊论文", "校外成果", "待确认", "需补邮箱"]:
         if sheet in xl.sheet_names:
             frames[sheet] = pd.read_excel(output_path, sheet_name=sheet, dtype=str, nrows=100)
     return frames
@@ -148,7 +148,7 @@ def main():
                     + ("；".join(stats.get("claim_email_filter", [])) or "无有效 @cuhk.edu.cn 邮箱")
                 )
 
-            preview_sheet_names = ["全部数据", "期刊论文", "会议论文", "综述论文", "校外成果", "待确认", "需补邮箱"]
+            preview_sheet_names = ["全部数据", "期刊论文", "校外成果", "待确认", "需补邮箱"]
             tabs = st.tabs(preview_sheet_names)
             for tab, sheet_name in zip(tabs, preview_sheet_names):
                 with tab:
