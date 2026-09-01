@@ -90,6 +90,10 @@ p {
   min-width: 0;
 }
 
+.field[hidden] {
+  display: none;
+}
+
 .field.wide {
   grid-column: span 2;
 }
