@@ -1,5 +1,5 @@
 const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/";
-const APP_VERSION = "20260901-single-source-mapping";
+const APP_VERSION = "20260901-external-claim-filter";
 const MODULE_FILES = ["claim_mapping.py", "scope_rules.py", "converter.py"];
 
 const els = {
@@ -13,6 +13,7 @@ const els = {
   aliasFile: document.getElementById("aliasFile"),
   apiKey: document.getElementById("apiKey"),
   claimEmailFilter: document.getElementById("claimEmailFilter"),
+  claimEmailFilterField: document.getElementById("claimEmailFilterField"),
   downloadXlsx: document.getElementById("downloadXlsx"),
   downloadCsv: document.getElementById("downloadCsv"),
 };
@@ -106,6 +107,10 @@ function selectedMode() {
   return document.querySelector('input[name="mode"]:checked')?.value || "local";
 }
 
+function updateClaimEmailFilterVisibility() {
+  els.claimEmailFilterField.hidden = selectedMode() !== "external";
+}
+
 function renderMetrics(stats) {
   const items = [
     ["全部数据", stats.total],
@@ -135,6 +140,7 @@ async function runConversionInBrowser() {
 
   try {
     await loadRuntime();
+    const mode = selectedMode();
     const session = `/work/session_${Date.now()}`;
     pyodide.FS.mkdirTree(session);
 
@@ -154,12 +160,15 @@ async function runConversionInBrowser() {
     pyodide.globals.set("INPUT_PATHS_JSON", JSON.stringify(inputPaths));
     pyodide.globals.set("OUTPUT_PATH", outputPath);
     pyodide.globals.set("CSV_PATH", csvPath);
-    pyodide.globals.set("MODE", selectedMode());
+    pyodide.globals.set("MODE", mode);
     pyodide.globals.set("ACCOUNT_PATH", accountPath || "");
     pyodide.globals.set("ARTICLE_PATH", articlePath || "");
     pyodide.globals.set("ALIAS_PATH", aliasPath || "");
     pyodide.globals.set("SCOPUS_API_KEY", els.apiKey.value.trim());
-    pyodide.globals.set("CLAIM_EMAIL_FILTER", els.claimEmailFilter.value.trim());
+    pyodide.globals.set(
+      "CLAIM_EMAIL_FILTER",
+      mode === "external" ? els.claimEmailFilter.value.trim() : "",
+    );
 
     const stats = await pyodide.runPythonAsync(`
 import json
@@ -199,4 +208,8 @@ json.dumps(stats, ensure_ascii=False)
 }
 
 els.runButton.addEventListener("click", runConversionInBrowser);
+for (const modeInput of document.querySelectorAll('input[name="mode"]')) {
+  modeInput.addEventListener("change", updateClaimEmailFilterVisibility);
+}
+updateClaimEmailFilterVisibility();
 setStatus("未加载");
