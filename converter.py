@@ -907,11 +907,16 @@ def run_conversion(
     scopus_api_key=None,
     claim_email_filter=None,
 ):
+    input_paths = list(input_paths or [])
+    single_source_mode = len(input_paths) == 1
     merged_db = {}
+    mapped_records = []
     publication_name_to_email = {}
     is_external_achievement = mode in {"external", "校外", "非本校成果", "校外成果"}
 
     print(f"准备处理 {len(input_paths)} 个文件...")
+    if single_source_mode:
+        print("单来源模式：逐条字段映射，不按 DOI 去重。")
     alias_registry = build_scholar_alias_registry(
         accounts_path=accounts_path,
         article_library_path=article_library_path,
@@ -1017,17 +1022,20 @@ def run_conversion(
                 if is_external_achievement:
                     record[CLAIM_COLUMN] = build_claim_value(record, publication_name_to_email)
 
-                doi = record.get("DOI")
-                if doi:
-                    if doi in merged_db:
-                        merged_db[doi] = merge_records(merged_db[doi], record)
-                    else:
-                        merged_db[doi] = record
+                if single_source_mode:
+                    mapped_records.append(record)
+                else:
+                    doi = record.get("DOI")
+                    if doi:
+                        if doi in merged_db:
+                            merged_db[doi] = merge_records(merged_db[doi], record)
+                        else:
+                            merged_db[doi] = record
 
         except Exception as e:
             print(f"读取错误 {file_path}: {e}")
 
-    output_df = pd.DataFrame(list(merged_db.values()))
+    output_df = pd.DataFrame(mapped_records if single_source_mode else list(merged_db.values()))
 
     output_columns = get_output_columns(is_external_achievement)
     for col in output_columns:

@@ -300,6 +300,53 @@ def test_run_conversion_supports_each_source_as_the_only_input(tmp_path):
         assert journal_records["DOI"].tolist() == [frame.iloc[0]["DOI"]]
 
 
+def test_run_conversion_single_source_maps_records_without_doi_or_deduplication(tmp_path):
+    input_path = tmp_path / "scopus_single_source.xlsx"
+    alias_path = tmp_path / "aliases.xlsx"
+    output_path = tmp_path / "out.xlsx"
+    pd.DataFrame(
+        [
+            {
+                "EID": "2-s2.0-no-doi",
+                "Title": "Single source without DOI",
+                "Authors": "Author, A",
+                "Document Type": "Article",
+            },
+            {
+                "EID": "2-s2.0-duplicate-one",
+                "Title": "First row sharing a DOI",
+                "Authors": "Author, A",
+                "DOI": "10.1000/single-source-duplicate",
+                "Document Type": "Article",
+            },
+            {
+                "EID": "2-s2.0-duplicate-two",
+                "Title": "Second row sharing a DOI",
+                "Authors": "Author, A",
+                "DOI": "10.1000/single-source-duplicate",
+                "Document Type": "Article",
+            },
+        ]
+    ).to_excel(input_path, index=False)
+    pd.DataFrame(columns=["别名", "姓名", "邮箱"]).to_excel(alias_path, index=False)
+
+    stats = run_conversion(
+        [str(input_path)],
+        str(output_path),
+        "local",
+        alias_path=str(alias_path),
+    )
+
+    all_records = pd.read_excel(output_path, sheet_name="全部数据", dtype=str).fillna("")
+    assert stats["total"] == 3
+    assert all_records["题名"].tolist() == [
+        "Single source without DOI",
+        "First row sharing a DOI",
+        "Second row sharing a DOI",
+    ]
+    assert all_records["DOI"].tolist() == ["", "10.1000/single-source-duplicate", "10.1000/single-source-duplicate"]
+
+
 def test_process_scopus_row_normalizes_keywords():
     row = pd.Series(
         {

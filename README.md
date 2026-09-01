@@ -98,7 +98,7 @@ python3 converter.py outputs/result.xlsx --external \
 
 | Sheet | 用途 |
 | --- | --- |
-| `全部数据` | 所有成功合并且有 DOI 的成果；类型冲突记录除外 |
+| `全部数据` | 单一来源时为所有完成字段映射的成果；多个来源时为成功按 DOI 合并的成果；类型冲突记录除外 |
 | `期刊论文` | Article 与 Review 类型记录；`Review` 按期刊论文处理 |
 | `会议论文` | Conference paper、Proceedings paper、workshop 等会议类记录 |
 | `本校成果` | 本校成果模式或判定为本校的记录 |
@@ -121,7 +121,7 @@ python3 converter.py outputs/result.xlsx --external \
 1. 读取输入文件，清理 BOM、空白和异常表头。
 2. 识别数据来源：Scopus、WOS、EI 或机构库成果表。
 3. 将不同来源字段映射到统一中文字段。
-4. 标准化 DOI，并以 DOI 作为主键合并重复记录。
+4. 单一来源时逐条完成字段映射，不以 DOI 去重；多个来源时标准化 DOI，并以 DOI 作为主键合并重复记录。
 5. 合并来源库、收录类别、数据库记录号和引用指标。
 6. Conference paper、Proceedings paper、workshop 等会议类记录导出到 `会议论文`；若同一 DOI 同时被标记为会议类与 Article/Review，则转入 `待确认` 并标注审核原因；`Review` 保留在期刊论文中。
 7. 根据本校/校外模式补充数据归属字段。
@@ -191,7 +191,7 @@ pytest tests/test_converter.py tests/test_scope_rules.py
 
 ## 注意事项
 
-- 当前主流程以 DOI 作为合并主键，没有 DOI 的记录不会进入最终导出。
+- 单一来源不要求 DOI，所有可读取记录都会导出；多个来源仍以 DOI 作为合并主键，因此无 DOI 的记录不会进入多来源合并结果。
 - 校外成果的 `作品认领` 质量依赖别名表、账户表和文章库的完整性。
 - 单位关键词只作为辅助证据，不直接替代人工确认。
 - Scopus API Key 只用于补充学科分类，不影响基础转换流程。
@@ -200,7 +200,7 @@ pytest tests/test_converter.py tests/test_scope_rules.py
 ## 后续计划
 
 - 抽象 `ui.py` 和 `converter.py` 的重复处理流程，减少维护成本
-- 支持无 DOI 记录按题名、年份、期刊进行备用去重
+- 在不改变多来源 DOI 合并规则的前提下，继续优化无 DOI 数据的人工复核支持
 - 增强 `待确认` 记录的人工校对和回写能力
 - 增加更多真实样例的自动化测试
 - 优化 Scopus / WOS / EI 不同导出版本的字段兼容性
