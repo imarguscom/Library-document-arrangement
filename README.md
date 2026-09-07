@@ -156,7 +156,7 @@ src/博文阁用户别名表.xlsx
 
 ## Scopus 学科补充
 
-桌面版和网页版支持可选填写 Scopus API Key。填写后，程序会基于 DOI 或 SCOPUSEID 调用 Elsevier Abstract API，补充 `Scopus学科分类`。
+桌面版支持可选填写 Scopus API Key。填写后，程序会基于 DOI 或 SCOPUSEID 调用 Elsevier Abstract API，补充 `Scopus学科分类`。
 
 不填写 API Key 时，主流程仍可正常清洗、合并和导出，只是跳过学科补充。
 

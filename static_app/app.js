@@ -1,5 +1,5 @@
 const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/";
-const APP_VERSION = "20260907-scopus-priority";
+const APP_VERSION = "20260907-alias-only";
 const MODULE_FILES = ["claim_mapping.py", "scope_rules.py", "converter.py"];
 
 const els = {
@@ -8,10 +8,7 @@ const els = {
   metrics: document.getElementById("metrics"),
   runButton: document.getElementById("runButton"),
   dataFiles: document.getElementById("dataFiles"),
-  accountFile: document.getElementById("accountFile"),
-  articleFile: document.getElementById("articleFile"),
   aliasFile: document.getElementById("aliasFile"),
-  apiKey: document.getElementById("apiKey"),
   claimEmailFilter: document.getElementById("claimEmailFilter"),
   claimEmailFilterField: document.getElementById("claimEmailFilterField"),
   downloadXlsx: document.getElementById("downloadXlsx"),
@@ -151,8 +148,6 @@ async function runConversionInBrowser() {
       inputPaths.push(path);
     }
 
-    const accountPath = await writeUploadedFile(els.accountFile.files?.[0], `${session}/account_${fileNameSafe(els.accountFile.files?.[0]?.name)}`);
-    const articlePath = await writeUploadedFile(els.articleFile.files?.[0], `${session}/article_${fileNameSafe(els.articleFile.files?.[0]?.name)}`);
     const aliasPath = await writeUploadedFile(els.aliasFile.files?.[0], `${session}/alias_${fileNameSafe(els.aliasFile.files?.[0]?.name)}`);
     const outputPath = `${session}/博文阁导入_文献数据合并.xlsx`;
     const csvPath = `${session}/博文阁导入_全部数据.csv`;
@@ -161,10 +156,7 @@ async function runConversionInBrowser() {
     pyodide.globals.set("OUTPUT_PATH", outputPath);
     pyodide.globals.set("CSV_PATH", csvPath);
     pyodide.globals.set("MODE", mode);
-    pyodide.globals.set("ACCOUNT_PATH", accountPath || "");
-    pyodide.globals.set("ARTICLE_PATH", articlePath || "");
     pyodide.globals.set("ALIAS_PATH", aliasPath || "");
-    pyodide.globals.set("SCOPUS_API_KEY", els.apiKey.value.trim());
     pyodide.globals.set(
       "CLAIM_EMAIL_FILTER",
       mode === "external" ? els.claimEmailFilter.value.trim() : "",
@@ -179,10 +171,7 @@ stats = run_conversion(
     json.loads(INPUT_PATHS_JSON),
     OUTPUT_PATH,
     MODE,
-    accounts_path=ACCOUNT_PATH or None,
-    article_library_path=ARTICLE_PATH or None,
     alias_path=ALIAS_PATH or None,
-    scopus_api_key=SCOPUS_API_KEY or None,
     claim_email_filter=CLAIM_EMAIL_FILTER or None,
 )
 all_df = pd.read_excel(OUTPUT_PATH, sheet_name="全部数据", dtype=str)
