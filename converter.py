@@ -491,6 +491,8 @@ def process_scopus_row(row):
 
     corr_str = safe_get(row, ["Correspondence Address", "通讯地址", "通信地址", "通讯作者地址", "联系地址"])
     corr_author_name, corr_author_affs = parse_scopus_correspondence(corr_str, full_names)
+    if not corr_author_name:
+        corr_author_name = safe_get(row, ["Corresponding Author", "通讯作者"])
 
     date_val = normalize_date(safe_get(row, ["Year", "年份", "日期"]))
     lang_raw = safe_get(row, ["Language of Original Document", "文献原始语言", "语种", "原始文献语言"])
@@ -532,6 +534,7 @@ def process_scopus_row(row):
         "作者单位": formatted_affils,
         "第一作者": first_author_name,
         "Scopus被引次数": safe_get(row, ["Cited by", "被引次数", "施引文献"]),
+        "Scopus学科分类": safe_get(row, ["Subject Areas", "Scopus Subject Areas", "Scopus学科分类"]),
         "来源库": "SCOPUS",
     }
 
@@ -805,6 +808,10 @@ def merge_records(existing, new_data):
                 existing[key] = val
             elif key not in existing or not existing[key] or str(existing[key]) in ["nan", "nan-nan", "-"]:
                 existing[key] = val
+            continue
+
+        if key == "通讯作者" and "SCOPUS" in str(new_data.get("来源库", "")).upper():
+            existing[key] = val
             continue
 
         if key not in existing or not existing[key] or str(existing[key]) in ["nan", "nan-nan", "-"]:
