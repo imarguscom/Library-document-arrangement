@@ -6,7 +6,7 @@
     <title>文献数据合并与博文阁导入工具</title>
     <link rel="stylesheet" href="./style.css?v=20260901-claim-filter-visibility" />
     <script defer src="https://cdn.jsdelivr.net/pyodide/v0.28.3/full/pyodide.js"></script>
-    <script defer src="./app.js?v=20260907-scopus-priority"></script>
+    <script defer src="./app.js?v=20260907-alias-only"></script>
   </head>
   <body>
     <main class="shell">
@@ -31,24 +31,9 @@
             <label><input type="radio" name="mode" value="external" /> 校外成果</label>
           </fieldset>
 
-          <label class="field">
-            <span>账户表</span>
-            <input id="accountFile" type="file" accept=".xlsx,.xls,.csv" />
-          </label>
-
-          <label class="field">
-            <span>文章库</span>
-            <input id="articleFile" type="file" accept=".xlsx,.xls,.csv" />
-          </label>
-
-          <label class="field">
-            <span>学者别名表</span>
+          <label class="field wide">
+            <span>学者别名表（用于匹配，可选）</span>
             <input id="aliasFile" type="file" accept=".xlsx,.xls,.csv" />
-          </label>
-
-          <label class="field">
-            <span>Scopus API Key</span>
-            <input id="apiKey" type="password" autocomplete="off" />
           </label>
 
           <label id="claimEmailFilterField" class="field wide" hidden>
