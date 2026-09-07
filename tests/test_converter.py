@@ -362,6 +362,47 @@ def test_process_scopus_row_normalizes_keywords():
     assert record["关键词"] == "speech processing; audio anti-spoofing; deep learning"
 
 
+def test_process_scopus_row_maps_subject_areas_and_corresponding_author():
+    row = pd.Series(
+        {
+            "DOI": "10.1/scopus-fields",
+            "Title": "Scopus field mapping",
+            "Corresponding Author": "Gao, Xiaoxue",
+            "Subject Areas": "Signal Processing; Applied Mathematics",
+            "EID": "2-s2.0-scopus-fields",
+        }
+    )
+
+    record = process_scopus_row(row)
+
+    assert record["通讯作者"] == "Gao, Xiaoxue"
+    assert record["Scopus学科分类"] == "Signal Processing; Applied Mathematics"
+
+
+def test_merge_records_prefers_scopus_corresponding_author_and_keeps_wos_fallback():
+    wos_record = {
+        "DOI": "10.1/corresponding-author",
+        "通讯作者": "Wang, J.",
+        "来源库": "WOS",
+    }
+    scopus_record = {
+        "DOI": "10.1/corresponding-author",
+        "通讯作者": "Wang, Jianwei",
+        "来源库": "SCOPUS",
+    }
+
+    merged = merge_records(wos_record.copy(), scopus_record)
+    assert merged["通讯作者"] == "Wang, Jianwei"
+
+    scopus_without_corresponding_author = {
+        "DOI": "10.1/corresponding-author",
+        "通讯作者": "",
+        "来源库": "SCOPUS",
+    }
+    fallback = merge_records(wos_record.copy(), scopus_without_corresponding_author)
+    assert fallback["通讯作者"] == "Wang, J."
+
+
 def test_read_normal_csv_detects_semicolon_separator():
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, "sample.csv")
