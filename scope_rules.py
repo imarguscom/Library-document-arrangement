@@ -610,6 +610,7 @@ def infer_record_scope(record: dict, mode: str, alias_registry: dict | None = No
 
 def apply_scope_fields(df: pd.DataFrame, mode: str, alias_registry: dict | None = None) -> pd.DataFrame:
     df = df.copy()
+    is_external_mode = mode in {"external", "校外", "非本校成果", "校外成果"}
     for col in [CLAIM_COLUMN, *SCOPE_COLUMNS]:
         if col not in df.columns:
             df[col] = ""
@@ -619,7 +620,10 @@ def apply_scope_fields(df: pd.DataFrame, mode: str, alias_registry: dict | None 
         scope = infer_record_scope(record, mode, alias_registry)
         for col, value in scope.items():
             df.at[idx, col] = value
-        if mode == "external":
+        # A user-supplied email filter identifies the aliases allowed to fill
+        # the claim field in either mode.  External mode retains its existing
+        # claim-alignment behavior even when no filter is supplied.
+        if is_external_mode or (alias_registry or {}).get("claim_email_filter"):
             existing_claim = str(df.at[idx, CLAIM_COLUMN] or "").strip()
             aligned_claim = build_author_claim_value(record, alias_registry, existing_claim)
             if scope.get("本校学者邮箱"):
