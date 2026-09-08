@@ -56,14 +56,12 @@ def main():
 
     achievement_type = st.radio("成果类型", ["本校成果", "校外成果"], horizontal=True)
     mode = "local" if achievement_type == "本校成果" else "external"
-    claim_email_filter = ""
-    if mode == "external":
-        claim_email_filter = st.text_area(
-            "限定作品认领匹配邮箱（可选）",
-            value="",
-            placeholder="teacher1@cuhk.edu.cn; teacher2@cuhk.edu.cn",
-            height=80,
-        )
+    claim_email_filter = st.text_area(
+        "限定作品认领匹配邮箱（可选）",
+        value="",
+        placeholder="输入可能的本校作者邮箱（可多个，以分号或换行分隔）；系统按别名表中的邮箱—别名关系补全作品认领",
+        height=80,
+    )
 
     with st.expander("可选配置文件", expanded=False):
         account_file = st.file_uploader("账户表", type=SUPPORTED_CONFIG_TYPES, key="account")
@@ -142,7 +140,7 @@ def main():
             c11.metric("来源库含 WOS", int(wos_source_count))
             c12.metric("WOS记录号非空", int(wos_record_count))
             st.caption(f"当前使用的别名来源：{stats.get('alias_path') or '未找到；已回退到账户表/文章库等来源'}")
-            if mode == "external" and claim_email_filter.strip():
+            if claim_email_filter.strip():
                 st.caption(
                     "限定匹配邮箱："
                     + ("；".join(stats.get("claim_email_filter", [])) or "无有效 @cuhk.edu.cn 邮箱")

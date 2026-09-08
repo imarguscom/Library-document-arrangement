@@ -91,6 +91,15 @@ def test_existing_claim_is_not_overwritten():
     assert result.loc[0, "本校学者邮箱"] == "scholar@cuhk.edu.cn"
 
 
+def test_chinese_external_mode_aligns_claim_field():
+    df = pd.DataFrame([{"题名": "A", "作者": "Wang, Jiawei", CLAIM_COLUMN: "unknown"}])
+
+    result = apply_scope_fields(df, "校外成果", registry_with_email())
+
+    assert result.loc[0, "数据归属"] == "校外"
+    assert result.loc[0, CLAIM_COLUMN] == "scholar@cuhk.edu.cn"
+
+
 def test_excel_output_contains_expected_sheets(tmp_path):
     df = pd.DataFrame(
         [
@@ -331,6 +340,26 @@ def test_claim_email_filter_limits_external_alias_matching(tmp_path, monkeypatch
     assert "ming@cuhk.edu.cn" not in result.loc[0, CLAIM_COLUMN]
 
 
+def test_claim_email_filter_fills_local_claim_from_alias_table(tmp_path, monkeypatch):
+    _disable_default_account_and_article_discovery(monkeypatch)
+    alias_path = tmp_path / "博文阁用户别名表.xlsx"
+    pd.DataFrame(
+        [
+            {"别名": "Wang, Jiawei", "姓名": "王嘉伟", "邮箱": "jiawei@cuhk.edu.cn"},
+            {"别名": "Li, Ming", "姓名": "李明", "邮箱": "ming@cuhk.edu.cn"},
+        ]
+    ).to_excel(alias_path, sheet_name="epersonnamealias", index=False)
+    registry = build_scholar_alias_registry(accounts_path=None, article_library_path=None, alias_path=alias_path)
+    filtered = filter_alias_registry_by_emails(registry, "jiawei@cuhk.edu.cn")
+    df = pd.DataFrame([{"题名": "A", "作者": "Wang, Jiawei; Li, Ming", CLAIM_COLUMN: "unknown;unknown"}])
+
+    result = apply_scope_fields(df, "local", filtered)
+
+    assert result.loc[0, "数据归属"] == "本校"
+    assert result.loc[0, CLAIM_COLUMN] == "jiawei@cuhk.edu.cn;unknown"
+    assert "ming@cuhk.edu.cn" not in result.loc[0, CLAIM_COLUMN]
+
+
 def test_claim_email_filter_resolves_selected_conflict(tmp_path, monkeypatch):
     _disable_default_account_and_article_discovery(monkeypatch)
     alias_path = tmp_path / "博文阁用户别名表.xlsx"
@@ -487,3 +516,18 @@ def test_run_conversion_claim_email_filter_limits_claim_prefill(tmp_path, monkey
     assert all_data.loc[0, "本校学者邮箱"] == "jiawei@cuhk.edu.cn"
     assert all_data.loc[0, CLAIM_COLUMN] == "jiawei@cuhk.edu.cn;unknown"
     assert "ming@cuhk.edu.cn" not in all_data.loc[0, CLAIM_COLUMN]
+
+    local_output_path = tmp_path / "local_out.xlsx"
+    local_stats = run_conversion(
+        [input_path],
+        local_output_path,
+        "local",
+        accounts_path=account_path,
+        article_library_path=None,
+        alias_path=alias_path,
+        claim_email_filter="jiawei@cuhk.edu.cn",
+    )
+    local_data = pd.read_excel(local_output_path, sheet_name="全部数据", dtype=str).fillna("")
+
+    assert local_stats["claim_email_filter"] == ["jiawei@cuhk.edu.cn"]
+    assert local_data.loc[0, CLAIM_COLUMN] == "jiawei@cuhk.edu.cn;unknown"

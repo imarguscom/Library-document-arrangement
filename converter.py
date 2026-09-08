@@ -929,8 +929,8 @@ def run_conversion(
         article_library_path=article_library_path,
         alias_path=alias_path,
     )
-    claim_filter_emails = parse_claim_email_filter(claim_email_filter) if is_external_achievement else []
-    if is_external_achievement and str(claim_email_filter or "").strip():
+    claim_filter_emails = parse_claim_email_filter(claim_email_filter)
+    if str(claim_email_filter or "").strip():
         original_alias_count = len(alias_registry.get("aliases", {}))
         alias_registry = filter_alias_registry_by_emails(alias_registry, claim_email_filter)
         print(

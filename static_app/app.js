@@ -1,5 +1,5 @@
 const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/";
-const APP_VERSION = "20260907-alias-only";
+const APP_VERSION = "20260908-alias-claim-email";
 const MODULE_FILES = ["claim_mapping.py", "scope_rules.py", "converter.py"];
 
 const els = {
@@ -104,10 +104,6 @@ function selectedMode() {
   return document.querySelector('input[name="mode"]:checked')?.value || "local";
 }
 
-function updateClaimEmailFilterVisibility() {
-  els.claimEmailFilterField.hidden = selectedMode() !== "external";
-}
-
 function renderMetrics(stats) {
   const items = [
     ["全部数据", stats.total],
@@ -157,10 +153,7 @@ async function runConversionInBrowser() {
     pyodide.globals.set("CSV_PATH", csvPath);
     pyodide.globals.set("MODE", mode);
     pyodide.globals.set("ALIAS_PATH", aliasPath || "");
-    pyodide.globals.set(
-      "CLAIM_EMAIL_FILTER",
-      mode === "external" ? els.claimEmailFilter.value.trim() : "",
-    );
+    pyodide.globals.set("CLAIM_EMAIL_FILTER", els.claimEmailFilter.value.trim());
 
     const stats = await pyodide.runPythonAsync(`
 import json
@@ -197,8 +190,4 @@ json.dumps(stats, ensure_ascii=False)
 }
 
 els.runButton.addEventListener("click", runConversionInBrowser);
-for (const modeInput of document.querySelectorAll('input[name="mode"]')) {
-  modeInput.addEventListener("change", updateClaimEmailFilterVisibility);
-}
-updateClaimEmailFilterVisibility();
 setStatus("未加载");
