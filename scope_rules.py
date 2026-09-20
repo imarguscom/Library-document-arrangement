@@ -26,6 +26,10 @@ from claim_mapping import (
 
 CLAIM_COLUMN = "作品认领"
 DOCUMENT_TYPE_AUDIT_COLUMN = "文献类型审核原因"
+REVIEW_REASON_COLUMN = "复核原因"
+REVIEW_FIELDS_COLUMN = "待补字段"
+REVIEW_PATH_COLUMN = "建议复核路径"
+LOOKUP_PLACEHOLDERS = {"", "-", "--", "—", "n/a", "na", "none", "null", "nan", "未知"}
 SCOPE_COLUMNS = ["数据归属", "归属依据", "本校学者匹配", "本校学者邮箱", "学者匹配依据"]
 PREFERRED_FRONT_COLUMNS = ["题名", *SCOPE_COLUMNS, CLAIM_COLUMN]
 AUTHOR_FIELD_CANDIDATES = ["作者", "第一作者", "通讯作者", "已认领作者", "Author full names", "Authors", "Author"]
@@ -738,6 +742,83 @@ def is_review_record(row) -> bool:
     )
 
 
+def _text(value) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def _split_semicolon_values(value) -> list[str]:
+    return [item.strip() for item in _text(value).split(";") if item.strip()]
+
+
+def _has_affiliation_index(value: str) -> bool:
+    return bool(re.search(r"\s?\(\d+(?:,\d+)*\)\s*$", value))
+
+
+def _has_original_lookup_target(row) -> bool:
+    """Return whether a record has a minimally usable DOI or web URL.
+
+    This is deliberately syntactic only: it avoids routing placeholders to the
+    original-paper queue, while leaving actual reachability for human review.
+    """
+    doi = _text(row.get("DOI", ""))
+    if doi.casefold() not in LOOKUP_PLACEHOLDERS and re.match(r"^10\.\d{4,9}/\S+$", doi, flags=re.IGNORECASE):
+        return True
+    url = _text(row.get("URL", ""))
+    return url.casefold() not in LOOKUP_PLACEHOLDERS and bool(
+        re.match(r"^https?://[^\s]+$", url, flags=re.IGNORECASE)
+    )
+
+
+def _author_metadata_review_issues(row) -> tuple[list[str], list[str]]:
+    """Return original-paper-reviewable reasons and the fields they can fill."""
+    reasons = []
+    fields = []
+    # Some synthetic/legacy frames do not carry author metadata at all. That
+    # differs from a converted record whose 作者 field is present but empty.
+    if "作者" not in row.index:
+        return reasons, fields
+    authors = _split_semicolon_values(row.get("作者", ""))
+    affiliations = _split_semicolon_values(row.get("作者单位", ""))
+
+    if not authors:
+        return reasons, fields
+    if not affiliations:
+        reasons.append("缺少作者单位")
+        fields.append("作者单位")
+    else:
+        indexed_author_count = sum(_has_affiliation_index(author) for author in authors)
+        unindexed_affiliations = [
+            affiliation
+            for affiliation in affiliations
+            if not re.match(r"^\(\d+\)\s+", affiliation)
+        ]
+        if indexed_author_count == 0:
+            reasons.append("作者—单位关联缺失")
+            fields.append("作者—单位关联")
+        elif indexed_author_count < len(authors) or unindexed_affiliations:
+            reasons.append("作者—单位关联不完整")
+            fields.append("作者—单位关联")
+
+    if authors:
+        corresponding_author = _text(row.get("通讯作者", ""))
+        corresponding_affiliation = _text(row.get("通讯作者单位", ""))
+        if not corresponding_author:
+            reasons.append("缺少通讯作者")
+            fields.append("通讯作者")
+        elif not corresponding_affiliation:
+            reasons.append("缺少通讯作者单位")
+            fields.append("通讯作者单位")
+
+    return reasons, fields
+
+
+def _review_frame(columns, rows: list[dict]) -> pd.DataFrame:
+    review_columns = [*columns, REVIEW_REASON_COLUMN, REVIEW_FIELDS_COLUMN, REVIEW_PATH_COLUMN]
+    return pd.DataFrame(rows, columns=review_columns)
+
+
 def split_output_frames(df: pd.DataFrame) -> dict:
     df = df.copy()
     for col in [CLAIM_COLUMN, DOCUMENT_TYPE_AUDIT_COLUMN, *SCOPE_COLUMNS]:
@@ -762,7 +843,37 @@ def split_output_frames(df: pd.DataFrame) -> dict:
         & (matched != "待确认")
     ]
     scope_pending_mask = exportable_mask & (df["数据归属"] == "校外") & ((email == "") | (matched == "待确认"))
-    pending_df = df.loc[scope_pending_mask | document_type_conflict_mask].copy()
+    original_paper_rows = []
+    other_review_rows = []
+    for position, (_, row) in enumerate(df.iterrows()):
+        original_reasons, fields = _author_metadata_review_issues(row)
+        other_reasons = []
+        other_fields = []
+        if "作者" in row.index and not _split_semicolon_values(row.get("作者", "")):
+            other_reasons.append("缺少作者")
+            other_fields.append("作者")
+        if bool(document_type_conflict_mask.iloc[position]):
+            other_reasons.append(_text(row.get(DOCUMENT_TYPE_AUDIT_COLUMN, "")))
+        if bool(scope_pending_mask.iloc[position]):
+            other_reasons.append(_text(row.get("学者匹配依据", "")) or "本校学者匹配或邮箱待确认")
+
+        if not original_reasons and not other_reasons:
+            continue
+
+        record = row.to_dict()
+        if original_reasons and not other_reasons and _has_original_lookup_target(row):
+            record[REVIEW_REASON_COLUMN] = "；".join(original_reasons)
+            record[REVIEW_FIELDS_COLUMN] = "；".join(dict.fromkeys([*fields, *other_fields]))
+            record[REVIEW_PATH_COLUMN] = "查论文原文或出版社页面；仅在存在明确作者上标、单位映射或 Corresponding author 标记时补全。"
+            original_paper_rows.append(record)
+        else:
+            record[REVIEW_REASON_COLUMN] = "；".join([reason for reason in [*original_reasons, *other_reasons] if reason])
+            record[REVIEW_FIELDS_COLUMN] = "；".join(dict.fromkeys([*fields, *other_fields]))
+            record[REVIEW_PATH_COLUMN] = "核对原始来源、别名表或文献类型；缺少明确证据时不作猜测补全。"
+            other_review_rows.append(record)
+
+    original_paper_review_df = _review_frame(df.columns.tolist(), original_paper_rows)
+    other_review_df = _review_frame(df.columns.tolist(), other_review_rows)
     journal_df = included_df[included_df.apply(is_article_record, axis=1)]
     conference_df = included_df[included_df.apply(is_conference_record, axis=1)]
     return {
@@ -771,7 +882,8 @@ def split_output_frames(df: pd.DataFrame) -> dict:
         "会议论文": conference_df,
         "本校成果": local_df,
         "校外成果": external_ready_df,
-        "待确认": pending_df,
+        "待复核_可尝试原文补全": original_paper_review_df,
+        "待复核_其他": other_review_df,
         "需补邮箱": needs_email_df,
     }
 

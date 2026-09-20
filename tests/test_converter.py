@@ -173,6 +173,46 @@ def test_process_wos_row_matches_frontend_full_names_to_addresses():
     assert record["通讯作者"] == "Cowling, Benjamin J."
 
 
+def test_process_wos_row_does_not_infer_first_author_affiliation_without_author_tags():
+    row = pd.Series(
+        {
+            "DOI": "10.1000/no-author-address-links",
+            "Article Title": "Legacy WOS Address Test",
+            "Author Full Names": "Pei, Jian; Lin, Xuemin",
+            "Addresses": "Simon Fraser Univ, Burnaby, Canada; Univ New South Wales, Sydney, Australia",
+        }
+    )
+
+    record = process_wos_row(row)
+
+    assert record["作者"] == "Pei, Jian; Lin, Xuemin"
+    assert record["作者单位"] == "Simon Fraser Univ, Burnaby, Canada; Univ New South Wales, Sydney, Australia"
+    assert record["第一作者单位"] == ""
+
+
+def test_process_wos_row_keeps_bare_addresses_unlinked_in_mixed_format():
+    row = pd.Series(
+        {
+            "DOI": "10.1000/mixed-author-address-links",
+            "Article Title": "Mixed WOS Address Test",
+            "Author Full Names": "Ma, Chunyang; Zhang, Rui; Lin, Xuemin",
+            "Addresses": (
+                "[Zhang, Rui] Univ Melbourne, Melbourne, Australia; "
+                "Zhejiang Univ, Hangzhou, China; Univ New South Wales, Sydney, Australia"
+            ),
+        }
+    )
+
+    record = process_wos_row(row)
+
+    assert record["作者"] == "Ma, Chunyang; Zhang, Rui (1); Lin, Xuemin"
+    assert record["作者单位"] == (
+        "(1) Univ Melbourne, Melbourne, Australia; Zhejiang Univ, Hangzhou, China; "
+        "Univ New South Wales, Sydney, Australia"
+    )
+    assert record["第一作者单位"] == ""
+
+
 def test_merge_records_prefers_author_text_with_more_affiliation_markers():
     existing = {
         "DOI": "10.1109/lmwt.2026.3659596",
@@ -229,7 +269,7 @@ def test_run_conversion_routes_article_conference_type_conflict_to_pending_revie
 
     all_records = pd.read_excel(output_path, sheet_name="全部数据", dtype=str)
     assert all_records.empty
-    pending_records = pd.read_excel(output_path, sheet_name="待确认", dtype=str).fillna("")
+    pending_records = pd.read_excel(output_path, sheet_name="待复核_其他", dtype=str).fillna("")
     assert pending_records["DOI"].tolist() == [doi]
     assert pending_records["原始文献类型"].tolist() == ["Article; Conference Paper"]
     assert "来源文献类型冲突" in pending_records.loc[0, "文献类型审核原因"]

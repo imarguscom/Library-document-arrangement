@@ -1,5 +1,5 @@
 const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/";
-const APP_VERSION = "20260908-alias-claim-email";
+const APP_VERSION = "20260920-review-queues";
 const MODULE_FILES = ["claim_mapping.py", "scope_rules.py", "converter.py"];
 
 const els = {
@@ -109,7 +109,8 @@ function renderMetrics(stats) {
     ["全部数据", stats.total],
     ["本校成果", stats.local],
     ["校外成果", stats.external_ready],
-    ["待确认", stats.pending],
+    ["可尝试原文补全", stats.reviewable_from_original],
+    ["其他待复核", stats.review_other],
     ["需补邮箱", stats.missing_email],
   ];
   els.metrics.innerHTML = items

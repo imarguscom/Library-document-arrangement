@@ -570,8 +570,18 @@ def process_wos_row(row):
             affil_list = []
             author_affil_map = {}
             
-            for authors_in_bracket, affil in matches:
-                affil = affil.strip().rstrip(';')
+            unlinked_affils = []
+            for authors_in_bracket, affil_text in matches:
+                # A bracketed author list only proves the association with the
+                # immediately following address. Some legacy WOS records mix
+                # one bracketed address with later bare addresses; assigning
+                # those later addresses to the preceding authors would invent
+                # an author--affiliation relationship.
+                affil_parts = [part.strip() for part in affil_text.split(';') if part.strip()]
+                if not affil_parts:
+                    continue
+                affil = affil_parts[0]
+                unlinked_affils.extend(affil_parts[1:])
                 if affil not in affil_list:
                     affil_list.append(affil)
                 affil_idx = affil_list.index(affil) + 1
@@ -612,9 +622,10 @@ def process_wos_row(row):
                     fmt_aus.append(au)
             
             formatted_authors = "; ".join(fmt_aus)
-            formatted_affils = "; ".join([f"({i+1}) {aff}" for i, aff in enumerate(affil_list)])
+            formatted_affils = "; ".join(
+                [f"({i+1}) {aff}" for i, aff in enumerate(affil_list)] + unlinked_affils
+            )
             
-            first_author_aff = affil_list[0] if affil_list else ""
             if af_list:
                 first_key = normalize_author_match_key(af_list[0])
                 first_indices = author_affil_map.get(first_key)
@@ -627,9 +638,8 @@ def process_wos_row(row):
                         for idx in sorted(set(first_indices))
                         if 0 < idx <= len(affil_list)
                     )
-    else:
-        if addresses:
-            first_author_aff = addresses.split(';')[0].strip()
+    # A legacy WOS Addresses field may list institutions without author tags.
+    # Its first address is not evidence that it belongs to the first author.
 
     # 提取通讯作者全名及单位
     rp_address = safe_get(row, ["Reprint Addresses", "RP", "通讯地址"])
@@ -1064,7 +1074,12 @@ def run_conversion(
         "total": sheet_counts.get("全部数据", 0),
         "local": sheet_counts.get("本校成果", 0),
         "external_ready": sheet_counts.get("校外成果", 0),
-        "pending": sheet_counts.get("待确认", 0),
+        "pending": (
+            sheet_counts.get("待复核_可尝试原文补全", 0)
+            + sheet_counts.get("待复核_其他", 0)
+        ),
+        "reviewable_from_original": sheet_counts.get("待复核_可尝试原文补全", 0),
+        "review_other": sheet_counts.get("待复核_其他", 0),
         "missing_email": sheet_counts.get("需补邮箱", 0),
         "sheet_counts": sheet_counts,
         "alias_path": alias_registry.get("alias_path", ""),

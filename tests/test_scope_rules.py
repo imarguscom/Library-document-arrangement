@@ -114,12 +114,12 @@ def test_excel_output_contains_expected_sheets(tmp_path):
     output = tmp_path / "out.xlsx"
     counts = write_multi_sheet_excel(output_df, output)
     sheets = pd.ExcelFile(output).sheet_names
-    assert {"全部数据", "期刊论文", "会议论文", "本校成果", "校外成果", "待确认"}.issubset(set(sheets))
+    assert {"全部数据", "期刊论文", "会议论文", "本校成果", "校外成果", "待复核_可尝试原文补全", "待复核_其他"}.issubset(set(sheets))
     assert "综述论文" not in sheets
     assert counts["全部数据"] == 3
     assert counts["本校成果"] == 1
     assert counts["校外成果"] == 1
-    assert counts["待确认"] == 1
+    assert counts["待复核_其他"] == 3
 
 
 def test_split_output_frames_excludes_conference_and_keeps_review_with_articles():
@@ -161,10 +161,105 @@ def test_split_output_frames_excludes_conference_and_keeps_review_with_articles(
         "Proceedings Source Article",
         "Review",
     ]
-    assert frames["待确认"]["题名"].tolist() == ["Proceedings"]
-    assert "来源文献类型冲突" in frames["待确认"].iloc[0]["文献类型审核原因"]
+    assert frames["待复核_其他"]["题名"].tolist() == ["Proceedings"]
+    assert "来源文献类型冲突" in frames["待复核_其他"].iloc[0]["文献类型审核原因"]
     assert frames["会议论文"]["题名"].tolist() == ["Conference"]
     assert "综述论文" not in frames
+
+
+def test_split_output_frames_separates_original_paper_review_from_other_review():
+    df = pd.DataFrame(
+        [
+            {
+                "题名": "Recoverable affiliation",
+                "DOI": "10.1000/recoverable-affiliation",
+                "作者": "Author, One; Author, Two",
+                "作者单位": "University A; University B",
+                "通讯作者": "Author, One",
+                "通讯作者单位": "University A",
+                "数据归属": "本校",
+            },
+            {
+                "题名": "Recoverable corresponding author",
+                "DOI": "10.1000/recoverable-corresponding",
+                "作者": "Author, One (1)",
+                "作者单位": "(1) University A",
+                "通讯作者": "",
+                "通讯作者单位": "",
+                "数据归属": "本校",
+            },
+            {
+                "题名": "No lookup target",
+                "作者": "Author, One",
+                "作者单位": "University A",
+                "通讯作者": "Author, One",
+                "通讯作者单位": "University A",
+                "数据归属": "本校",
+            },
+            {
+                "题名": "Recoverable missing authors",
+                "DOI": "10.1000/recoverable-missing-authors",
+                "作者": "",
+                "作者单位": "University A",
+                "数据归属": "本校",
+            },
+            {
+                "题名": "Placeholder lookup target",
+                "DOI": "N/A",
+                "URL": "-",
+                "作者": "Author, One",
+                "作者单位": "University A",
+                "通讯作者": "Author, One",
+                "通讯作者单位": "University A",
+                "数据归属": "本校",
+            },
+            {
+                "题名": "Recoverable URL only",
+                "URL": "https://example.org/article/123",
+                "作者": "Author, One (1)",
+                "作者单位": "(1) University A",
+                "通讯作者": "",
+                "通讯作者单位": "",
+                "数据归属": "本校",
+            },
+            {
+                "题名": "Scope pending",
+                "DOI": "10.1000/scope-pending",
+                "作者": "Author, One",
+                "作者单位": "(1) University A",
+                "通讯作者": "Author, One",
+                "通讯作者单位": "University A",
+                "数据归属": "校外",
+                "本校学者匹配": "待确认",
+                "本校学者邮箱": "",
+                "学者匹配依据": "别名冲突，需人工确认",
+            },
+        ]
+    )
+
+    frames = split_output_frames(df)
+    original_review = frames["待复核_可尝试原文补全"].fillna("")
+    other_review = frames["待复核_其他"].fillna("")
+
+    assert original_review["题名"].tolist() == [
+        "Recoverable affiliation",
+        "Recoverable corresponding author",
+        "Recoverable URL only",
+    ]
+    assert original_review["复核原因"].tolist() == ["作者—单位关联缺失", "缺少通讯作者", "缺少通讯作者"]
+    assert original_review["待补字段"].tolist() == ["作者—单位关联", "通讯作者", "通讯作者"]
+    assert "明确作者上标" in original_review.loc[0, "建议复核路径"]
+    assert other_review["题名"].tolist() == [
+        "No lookup target",
+        "Recoverable missing authors",
+        "Placeholder lookup target",
+        "Scope pending",
+    ]
+    assert "作者—单位关联缺失" in other_review.loc[0, "复核原因"]
+    assert other_review.loc[1, "复核原因"] == "缺少作者"
+    assert other_review.loc[1, "待补字段"] == "作者"
+    assert "作者—单位关联缺失" in other_review.loc[2, "复核原因"]
+    assert "别名冲突" in other_review.loc[3, "复核原因"]
 
 
 def test_default_scholar_author_name_forms_structure_can_be_read():
@@ -463,7 +558,7 @@ def test_default_alias_discovery_used_by_converter(tmp_path, monkeypatch):
     assert stats["alias_path"] == str(formal_path)
     assert stats["alias_count"] == 1
     xl = pd.ExcelFile(output_path)
-    assert {"全部数据", "校外成果", "待确认", "需补邮箱"}.issubset(set(xl.sheet_names))
+    assert {"全部数据", "校外成果", "待复核_可尝试原文补全", "待复核_其他", "需补邮箱"}.issubset(set(xl.sheet_names))
     external = pd.read_excel(output_path, sheet_name="校外成果", dtype=str).fillna("")
     assert external.loc[0, "本校学者邮箱"] == "chen@cuhk.edu.cn"
 

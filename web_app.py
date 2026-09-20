@@ -24,7 +24,7 @@ def _save_uploaded_file(uploaded_file, directory: Path) -> str:
 def _read_preview_frames(output_path: str):
     xl = pd.ExcelFile(output_path)
     frames = {}
-    for sheet in ["全部数据", "期刊论文", "会议论文", "校外成果", "待确认", "需补邮箱"]:
+    for sheet in ["全部数据", "期刊论文", "会议论文", "校外成果", "待复核_可尝试原文补全", "待复核_其他", "需补邮箱"]:
         if sheet in xl.sheet_names:
             frames[sheet] = pd.read_excel(output_path, sheet_name=sheet, dtype=str, nrows=100)
     return frames
@@ -44,7 +44,7 @@ def main():
     st.write(
         "本校成果通常来自三大数据库前台本校检索下载。"
         "校外成果通常来自本校学者 Author ID/API 采集，导入博文阁时需要匹配本校学者邮箱并补全作品认领。"
-        "未匹配到的记录会进入待确认。"
+        "需要人工处理的记录会按是否可尝试查原文补全分入两张待复核表。"
         "默认优先使用 src/博文阁用户别名表.xlsx；若上传别名表，本次上传文件优先；若正式别名表不存在，则回退到其他别名来源。"
     )
 
@@ -127,11 +127,12 @@ def main():
             c1.metric("全部数据", stats["total"])
             c2.metric("本校成果", stats["local"])
             c3.metric("校外成果", stats["external_ready"])
-            c4.metric("待确认", stats["pending"])
-            c5, c6, c7 = st.columns(3)
-            c5.metric("需补邮箱", stats["missing_email"])
-            c6.metric("校外邮箱非空", int(email_nonempty))
-            c7.metric("校外作品认领非空", int(claim_nonempty))
+            c4.metric("可尝试原文补全", stats.get("reviewable_from_original", 0))
+            c5, c6, c7, c8 = st.columns(4)
+            c5.metric("其他待复核", stats.get("review_other", 0))
+            c6.metric("需补邮箱", stats["missing_email"])
+            c7.metric("校外邮箱非空", int(email_nonempty))
+            c8.metric("校外作品认领非空", int(claim_nonempty))
             c8, c9, c10 = st.columns(3)
             c8.metric("alias 总数", stats.get("alias_count", 0))
             c9.metric("冲突 alias", stats.get("conflict_alias_count", 0))
@@ -146,7 +147,7 @@ def main():
                     + ("；".join(stats.get("claim_email_filter", [])) or "无有效 @cuhk.edu.cn 邮箱")
                 )
 
-            preview_sheet_names = ["全部数据", "期刊论文", "会议论文", "校外成果", "待确认", "需补邮箱"]
+            preview_sheet_names = ["全部数据", "期刊论文", "会议论文", "校外成果", "待复核_可尝试原文补全", "待复核_其他", "需补邮箱"]
             tabs = st.tabs(preview_sheet_names)
             for tab, sheet_name in zip(tabs, preview_sheet_names):
                 with tab:
