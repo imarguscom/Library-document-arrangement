@@ -18,6 +18,7 @@ from converter import (
     run_conversion,
     split_scopus_author_affiliation_entries,
 )
+from scope_rules import split_output_frames
 
 
 def test_normalize_doi_strips_prefix_and_spaces():
@@ -518,3 +519,132 @@ def test_read_normal_csv_detects_semicolon_separator():
         df = read_normal_csv_robust(path)
     assert list(df.columns) == ["A", "B"]
     assert df.iloc[0]["A"] == "1"
+
+
+def test_process_scopus_row_matches_affiliations_by_author_identity_not_entry_position():
+    row = pd.Series(
+        {
+            "DOI": "10.1000/scopus-reordered-author-entries",
+            "Title": "Scopus reordered author entries",
+            "Author full names": "Alpha, Alice; Bravo, Bob",
+            "Affiliations": "Institute B; Institute A",
+            # The entry order is intentionally different from Author full names.
+            "Authors with affiliations": "Bravo B. (Institute B); Alpha A. (Institute A)",
+            "EID": "2-s2.0-reordered-author-entries",
+        }
+    )
+
+    record = process_scopus_row(row)
+
+    assert record["作者"] == "Alpha, Alice(2); Bravo, Bob(1)"
+    assert record["作者单位"] == "(1) Institute B; (2) Institute A"
+    assert record["第一作者单位"] == "Institute A"
+    assert record["作者—单位关联来源"] == "SCOPUS"
+
+
+def test_process_scopus_correspondence_resolves_initials_uniquely_not_first_surname_match():
+    row = pd.Series(
+        {
+            "DOI": "10.1000/scopus-correspondence-initials",
+            "Title": "Scopus correspondence initials",
+            "Author full names": "Li, Wei; Li, Ming",
+            "Affiliations": "Institute Wei; Institute Ming",
+            "Authors with affiliations": "Li W. (Institute Wei); Li M. (Institute Ming)",
+            "Correspondence Address": "Li, M.; Institute Ming; email: ming@example.org",
+            "EID": "2-s2.0-correspondence-initials",
+        }
+    )
+
+    record = process_scopus_row(row)
+
+    assert record["通讯作者"] == "Li, Ming"
+    assert record["通讯作者单位"] == "Institute Ming"
+    assert record["通讯作者来源"] == "SCOPUS: Correspondence Address"
+    assert record["通讯作者单位来源"] == "SCOPUS: Correspondence Address"
+
+
+def _paired_wos_record(doi, corresponding_author="Alpha, A", corresponding_affiliation="Institute A"):
+    return process_wos_row(
+        pd.Series(
+            {
+                "DOI": doi,
+                "Article Title": "Paired author affiliations",
+                "Author Full Names": "Alpha, Alice; Bravo, Bob",
+                "Addresses": "[Alpha, Alice] Institute A; [Bravo, Bob] Institute B",
+                "Reprint Addresses": (
+                    f"{corresponding_author} (corresponding author), {corresponding_affiliation}"
+                ),
+                "Document Type": "Article",
+            }
+        )
+    )
+
+
+def _paired_scopus_record(doi, alpha_affiliation="Institute A", bravo_affiliation="Institute B", corresponding_author=""):
+    return process_scopus_row(
+        pd.Series(
+            {
+                "DOI": doi,
+                "Title": "Paired author affiliations",
+                "Author full names": "Alpha, Alice; Bravo, Bob",
+                "Affiliations": "Institute B; Institute A",
+                # Deliberately reversed entry order and affiliation numbering.
+                "Authors with affiliations": (
+                    f"Bravo B. ({bravo_affiliation}); Alpha A. ({alpha_affiliation})"
+                ),
+                "Corresponding Author": corresponding_author,
+                "Correspondence Address": "",
+                "EID": "2-s2.0-paired-author-affiliations",
+                "Document Type": "Article",
+            }
+        )
+    )
+
+
+def test_merge_records_rerenders_author_numbers_from_one_selected_relationship_bundle():
+    doi = "10.1000/paired-author-affiliations"
+    wos_record = _paired_wos_record(doi)
+    scopus_record = _paired_scopus_record(doi)
+
+    merged = merge_records(wos_record, scopus_record)
+
+    # Scopus is the selected, complete bundle. Its author markers and unit
+    # list are regenerated together, so Alpha's (2) still means Institute A.
+    assert merged["作者"] == "Alpha, Alice(2); Bravo, Bob(1)"
+    assert merged["作者单位"] == "(1) Institute B; (2) Institute A"
+    assert merged["作者—单位关联来源"] == "SCOPUS"
+    assert merged["作者—单位关联冲突原因"] == ""
+    # WOS remains the complete correspondence pair; it is not combined with a
+    # name-only Scopus field.
+    assert merged["通讯作者"] == "Alpha, Alice"
+    assert merged["通讯作者单位"] == "Institute A"
+    assert merged["通讯作者来源"] == "WOS: Reprint Addresses"
+    assert merged["通讯作者单位来源"] == "WOS: Reprint Addresses"
+
+
+def test_cross_source_author_and_correspondence_conflicts_are_auditable_and_reviewable():
+    doi = "10.1000/paired-author-affiliation-conflict"
+    wos_record = _paired_wos_record(doi)
+    # Each filled Scopus pair contradicts WOS. The output must choose one
+    # complete source bundle, retain its sources, and surface the disagreement.
+    scopus_record = _paired_scopus_record(
+        doi,
+        alpha_affiliation="Institute B",
+        bravo_affiliation="Institute A",
+        corresponding_author="Bravo, Bob",
+    )
+
+    merged = merge_records(wos_record, scopus_record)
+    review_frames = split_output_frames(pd.DataFrame([merged]))
+    review = review_frames["待复核_可尝试原文补全"].fillna("")
+
+    assert merged["作者"] == "Alpha, Alice(1); Bravo, Bob(2)"
+    assert merged["作者单位"] == "(1) Institute B; (2) Institute A"
+    assert "跨来源作者—单位关系不一致" in merged["作者—单位关联冲突原因"]
+    assert merged["通讯作者"] == "Bravo, Bob"
+    assert merged["通讯作者单位"] == "Institute A"
+    assert merged["通讯作者来源"] == "SCOPUS: Corresponding Author"
+    assert merged["通讯作者单位来源"] == "SCOPUS: Authors with affiliations"
+    assert "跨来源通讯作者—单位关系不一致" in merged["通讯作者—单位关联冲突原因"]
+    assert "作者—单位关联存在冲突" in review.loc[0, "复核原因"]
+    assert "通讯作者—单位关联存在冲突" in review.loc[0, "复核原因"]

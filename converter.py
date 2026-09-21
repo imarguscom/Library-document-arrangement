@@ -24,8 +24,9 @@ TARGET_COLUMNS = [
     "关键词", "学科领域", "学科门类", "DOI", "URL", "收录类别", "语种", "资助项目",
     "WOS研究方向", "WOS类目", "WOS记录号", "CSCD记录号", "出版者", "EI入藏号",
     "EI主题词", "EI分类号", "原始文献类型", "文献类型审核原因", "发表状态", "字数", "CN", "卷/期/页",
-    "参考文献", "通讯作者", "来源库", "SCOPUS_ID", "Scopus学科分类", "SCOPUSEID",
+    "参考文献", "通讯作者", "通讯作者来源", "通讯作者单位来源", "通讯作者—单位关联冲突原因", "来源库", "SCOPUS_ID", "Scopus学科分类", "SCOPUSEID",
     "页数", "CNKI学科分类", "网络首发", "中图分类号", "作者单位", "第一作者",
+    "作者—单位关联来源", "作者—单位关联冲突原因",
     "已认领作者", "Scopus被引次数", "SCI被引次数", "CSCD被引次数", "影响因子",
     "5年平均影响因子", "所属专题", "发文作者类型"
 ]
@@ -35,6 +36,25 @@ CLAIM_SOURCE_COLUMNS = [CLAIM_COLUMN, "已认领作者", "注册邮箱", "邮箱
 AUTHOR_TYPE_COLUMNS = ["发文作者类型", "作者类型"]
 DEFAULT_DATE_SUFFIX = "-01-01"
 EXCEL_CELL_CHAR_LIMIT = 32767
+
+# Internal relationship bundles keep the author, affiliation, and
+# corresponding-author fields atomic while DOI records are being merged.
+AUTHOR_RELATIONS_KEY = "_author_affiliation_relations"
+CORRESPONDENCE_RELATIONS_KEY = "_correspondence_relations"
+AUTHOR_RELATION_SOURCE_COLUMN = "作者—单位关联来源"
+AUTHOR_RELATION_CONFLICT_COLUMN = "作者—单位关联冲突原因"
+CORRESPONDENCE_NAME_SOURCE_COLUMN = "通讯作者来源"
+CORRESPONDENCE_AFFILIATION_SOURCE_COLUMN = "通讯作者单位来源"
+CORRESPONDENCE_CONFLICT_COLUMN = "通讯作者—单位关联冲突原因"
+
+AUTHOR_RELATION_OUTPUT_FIELDS = {
+    "作者", "作者单位", "第一作者", "第一作者单位",
+    AUTHOR_RELATION_SOURCE_COLUMN, AUTHOR_RELATION_CONFLICT_COLUMN,
+}
+CORRESPONDENCE_OUTPUT_FIELDS = {
+    "通讯作者", "通讯作者单位", CORRESPONDENCE_NAME_SOURCE_COLUMN,
+    CORRESPONDENCE_AFFILIATION_SOURCE_COLUMN, CORRESPONDENCE_CONFLICT_COLUMN,
+}
 
 
 LANG_MAP = {
@@ -260,21 +280,24 @@ def scopus_author_name_parts(name):
     if "," in text:
         surname, given = text.split(",", 1)
         surname_tokens = re.findall(r"[A-Za-z0-9]+", surname.lower())
-        given_tokens = re.findall(r"[A-Za-z0-9]+", given.lower())
+        given_tokens = re.findall(r"[A-Za-z0-9]+", given)
     else:
-        tokens = re.findall(r"[A-Za-z0-9]+", text.lower())
+        tokens = re.findall(r"[A-Za-z0-9]+", text)
         if len(tokens) < 2:
-            return (tokens[0], "") if tokens else ("", "")
+            return (tokens[0].lower(), "") if tokens else ("", "")
         # Scopus affiliation entries are normally "Surname I.".  The
         # correspondence-address variant can instead be "I. Surname".
         if len(tokens[0]) == 1:
-            surname_tokens = [tokens[-1]]
+            surname_tokens = [tokens[-1].lower()]
             given_tokens = tokens[:-1]
         else:
-            surname_tokens = [tokens[0]]
+            surname_tokens = [tokens[0].lower()]
             given_tokens = tokens[1:]
     surname_key = "".join(surname_tokens)
-    initials = "".join(token[0] for token in given_tokens if token)
+    initials = "".join(
+        token.lower() if token.isupper() and len(token) <= 4 else token[0].lower()
+        for token in given_tokens if token
+    )
     return surname_key, initials
 
 
@@ -344,48 +367,83 @@ def format_indexed_affiliations(affiliations):
     return "; ".join([f"({idx}) {aff}" for idx, aff in enumerate(clean_affiliations, start=1)])
 
 def match_full_author_name(short_name, full_names):
-    short_name = str(short_name or "").strip()
-    if not short_name:
-        return ""
-    short_last = short_name.split(",")[0].strip().lower()
-    for full_name in full_names:
-        full_last = str(full_name).split(",")[0].strip().lower()
-        if short_last == full_last or short_last in full_last or full_last in short_last:
-            return full_name
-    return short_name
+    matched_name, _ = resolve_full_author_name(short_name, full_names)
+    return matched_name
 
-def parse_scopus_correspondence(corr_str, full_names):
+
+def build_scopus_author_bundle(full_names, auth_entries, master_affiliations):
+    """Build relations by author identity, never by the two export positions."""
+    entry_rows = [
+        {
+            "name": scopus_author_entry_name(entry),
+            "affiliations": affiliations_from_scopus_author_entry(entry),
+        }
+        for entry in auth_entries
+    ]
+    relations = []
+    conflicts = []
+    for name in full_names:
+        candidates = [
+            entry for entry in entry_rows
+            if scopus_author_names_match(name, entry["name"])
+        ]
+        if len(candidates) == 1:
+            relations.append({"name": name, "affiliations": candidates[0]["affiliations"]})
+        else:
+            relations.append({"name": name, "affiliations": []})
+            if auth_entries:
+                kind = "不唯一" if len(candidates) > 1 else "无法匹配"
+                conflicts.append(f"Scopus 作者—单位条目{kind}：{name}")
+    return _make_author_bundle(
+        relations,
+        master_affiliations,
+        "SCOPUS",
+        "Authors with affiliations",
+        conflicts,
+        marker_space=False,
+    )
+
+
+def parse_scopus_correspondence_relations(corr_str, full_names):
+    """Parse a correspondence address into verified author--affiliation pairs."""
     if not corr_str:
-        return "", ""
+        return [], []
     segments = [part.strip() for part in str(corr_str).split(";") if part.strip()]
-    authors = []
-    affiliations = []
+    relations = []
+    conflicts = []
     current_author = ""
     current_affiliations = []
 
     def flush_current():
-        if current_author:
-            author = match_full_author_name(current_author, full_names)
-            if author and author not in authors:
-                authors.append(author)
-            aff = "; ".join(current_affiliations).strip()
-            if aff and aff not in affiliations:
-                affiliations.append(aff)
+        if not current_author:
+            return
+        author, reason = resolve_full_author_name(current_author, full_names)
+        if author:
+            relations.append({"name": author, "affiliations": current_affiliations})
+        elif reason:
+            conflicts.append(reason)
 
     for segment in segments:
         if "email:" in segment.lower() or "@" in segment:
             flush_current()
             current_author = ""
             current_affiliations = []
-            continue
-        if not current_author:
+        elif not current_author:
             current_author = segment
-            current_affiliations = []
         else:
             current_affiliations.append(segment)
-
     flush_current()
-    return "; ".join(authors), "; ".join(affiliations)
+    return relations, _unique_values(conflicts)
+
+
+def parse_scopus_correspondence(corr_str, full_names):
+    relations, _ = parse_scopus_correspondence_relations(corr_str, full_names)
+    return (
+        "; ".join(_unique_values(relation["name"] for relation in relations)),
+        "; ".join(_unique_values(
+            affiliation for relation in relations for affiliation in relation.get("affiliations", [])
+        )),
+    )
 
 def safe_get(row, keys):
     """尝试从 row 中获取 keys 列表中第一个存在且非空的值，支持列名大小写不敏感匹配"""
@@ -408,6 +466,347 @@ def split_semicolon_values(value):
     if not text or text.lower() == "nan":
         return []
     return [x.strip() for x in re.split(r"[;；]", text) if x.strip()]
+
+
+def _unique_values(values):
+    result = []
+    seen = set()
+    for value in values:
+        value = str(value or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def _clean_affiliation(affiliation):
+    return re.sub(r"^(?:\(\d+\)|\d+[\).])\s*", "", str(affiliation or "")).strip(" ;；")
+
+
+def _affiliation_key(affiliation):
+    return re.sub(r"[^a-z0-9]", "", _clean_affiliation(affiliation).lower())
+
+
+def _author_identity_key(name):
+    surname, initials = scopus_author_name_parts(name)
+    return f"{surname}|{initials}" if surname and initials else ""
+
+
+def resolve_full_author_name(candidate, full_names):
+    """Resolve a source name only when it identifies one listed author.
+
+    A surname-only fallback silently turns ``Li, M.`` into the first ``Li`` in
+    an export.  Exact display names are accepted; every abbreviation must have
+    a unique surname-and-initials match instead.
+    """
+    candidate = normalize_author_display_name(candidate)
+    if not candidate:
+        return "", ""
+    normalized = candidate.casefold()
+    exact_matches = [
+        name for name in full_names
+        if normalize_author_display_name(name).casefold() == normalized
+    ]
+    if len(exact_matches) == 1:
+        return exact_matches[0], ""
+    if len(exact_matches) > 1:
+        return "", f"通讯作者姓名精确匹配不唯一：{candidate}"
+
+    key = _author_identity_key(candidate)
+    matches = [name for name in full_names if key and _author_identity_key(name) == key]
+    if len(matches) == 1:
+        return matches[0], ""
+    if len(matches) > 1:
+        return "", f"通讯作者姓名缩写匹配不唯一：{candidate}"
+    return "", f"通讯作者姓名无法匹配作者列表：{candidate}"
+
+
+def _make_author_bundle(
+    relations,
+    affiliations,
+    source,
+    evidence="",
+    conflicts=None,
+    marker_space=False,
+    unlinked_affiliations=None,
+    index_affiliations=True,
+):
+    clean_relations = []
+    for relation in relations or []:
+        name = normalize_author_display_name(relation.get("name", ""))
+        if not name:
+            continue
+        clean_relations.append({
+            "name": name,
+            "affiliations": _unique_values(
+                _clean_affiliation(affiliation)
+                for affiliation in relation.get("affiliations", [])
+                if _clean_affiliation(affiliation)
+            ),
+        })
+    clean_affiliations = _unique_values(
+        _clean_affiliation(affiliation) for affiliation in affiliations or [] if _clean_affiliation(affiliation)
+    )
+    for relation in clean_relations:
+        clean_affiliations = _unique_values([*clean_affiliations, *relation["affiliations"]])
+    return {
+        "relations": clean_relations,
+        "affiliations": clean_affiliations,
+        "unlinked_affiliations": _unique_values(
+            _clean_affiliation(affiliation)
+            for affiliation in unlinked_affiliations or []
+            if _clean_affiliation(affiliation)
+        ),
+        "source": str(source or ""),
+        "evidence": str(evidence or ""),
+        "conflicts": _unique_values(conflicts or []),
+        "marker_space": bool(marker_space),
+        "index_affiliations": bool(index_affiliations),
+    }
+
+
+def _render_author_bundle(bundle):
+    affiliations = _unique_values(bundle.get("affiliations", []))
+    index_by_affiliation = {
+        _affiliation_key(affiliation): index
+        for index, affiliation in enumerate(affiliations, start=1)
+        if _affiliation_key(affiliation)
+    }
+    rendered_authors = []
+    first_author = ""
+    first_author_affiliations = ""
+    for position, relation in enumerate(bundle.get("relations", [])):
+        name = relation["name"]
+        indices = _unique_values(
+            str(index_by_affiliation.get(_affiliation_key(affiliation), ""))
+            for affiliation in relation.get("affiliations", [])
+            if index_by_affiliation.get(_affiliation_key(affiliation))
+        )
+        if indices:
+            separator = " " if bundle.get("marker_space") else ""
+            rendered_authors.append(f"{name}{separator}({','.join(indices)})")
+        else:
+            rendered_authors.append(name)
+        if position == 0:
+            first_author = name
+            first_author_affiliations = "; ".join(
+                _unique_values(relation.get("affiliations", []))
+            )
+    return {
+        "作者": "; ".join(rendered_authors),
+        "作者单位": "; ".join(
+            [
+                format_indexed_affiliations(affiliations)
+                if bundle.get("index_affiliations", True)
+                else "; ".join(affiliations),
+                *bundle.get("unlinked_affiliations", []),
+            ]
+        ).strip(" ;"),
+        "第一作者": first_author,
+        "第一作者单位": first_author_affiliations,
+        AUTHOR_RELATION_SOURCE_COLUMN: bundle.get("source", ""),
+        AUTHOR_RELATION_CONFLICT_COLUMN: "；".join(bundle.get("conflicts", [])),
+    }
+
+
+def apply_author_bundle(record, bundle):
+    record.update(_render_author_bundle(bundle))
+    record[AUTHOR_RELATIONS_KEY] = bundle
+    return record
+
+
+def _author_bundle_from_record(record):
+    stored = record.get(AUTHOR_RELATIONS_KEY)
+    if isinstance(stored, dict):
+        return stored
+
+    affiliation_by_index = {}
+    all_affiliations = []
+    unlinked_affiliations = []
+    index_affiliations = False
+    for affiliation in split_semicolon_values(record.get("作者单位", "")):
+        match = re.match(r"^\((\d+)\)\s*(.*)$", affiliation)
+        if match:
+            index_affiliations = True
+            affiliation_by_index[match.group(1)] = _clean_affiliation(match.group(2))
+            all_affiliations.append(_clean_affiliation(match.group(2)))
+        else:
+            unlinked_affiliations.append(_clean_affiliation(affiliation))
+
+    relations = []
+    marker_space = False
+    for raw_author in split_semicolon_values(record.get("作者", "")):
+        match = re.match(r"^(.*?)\s*(\((?:\d+(?:,\d+)*)\))\s*$", raw_author)
+        if match:
+            marker_space = marker_space or bool(re.search(r"\s\(", raw_author))
+            indices = re.findall(r"\d+", match.group(2))
+            relations.append({
+                "name": match.group(1).strip(),
+                "affiliations": [affiliation_by_index[index] for index in indices if index in affiliation_by_index],
+            })
+        else:
+            relations.append({"name": raw_author, "affiliations": []})
+    return _make_author_bundle(
+        relations,
+        all_affiliations,
+        record.get(AUTHOR_RELATION_SOURCE_COLUMN) or record.get("来源库", ""),
+        conflicts=split_semicolon_values(record.get(AUTHOR_RELATION_CONFLICT_COLUMN, "")),
+        marker_space=marker_space,
+        unlinked_affiliations=unlinked_affiliations,
+        index_affiliations=index_affiliations,
+    )
+
+
+def _source_priority(source):
+    sources = str(source or "").upper()
+    if "SCOPUS" in sources:
+        return 3
+    if "WOS" in sources:
+        return 2
+    if "EI" in sources:
+        return 1
+    return 0
+
+
+def _author_bundle_score(bundle):
+    relations = bundle.get("relations", [])
+    linked = [relation for relation in relations if relation.get("affiliations")]
+    coverage = len(linked) / len(relations) if relations else 0
+    return (
+        coverage,
+        len(linked),
+        sum(len(relation.get("affiliations", [])) for relation in linked),
+        len(relations),
+        _source_priority(bundle.get("source")),
+    )
+
+
+def _author_bundle_signature(bundle):
+    return {
+        _author_identity_key(relation["name"]): tuple(sorted(_affiliation_key(affiliation) for affiliation in relation.get("affiliations", []) if _affiliation_key(affiliation)))
+        for relation in bundle.get("relations", [])
+        if _author_identity_key(relation["name"]) and relation.get("affiliations")
+    }
+
+
+def merge_author_bundles(existing_bundle, new_bundle):
+    existing_signature = _author_bundle_signature(existing_bundle)
+    new_signature = _author_bundle_signature(new_bundle)
+    conflict_messages = _unique_values([
+        *existing_bundle.get("conflicts", []), *new_bundle.get("conflicts", []),
+    ])
+    if (
+        existing_signature
+        and new_signature
+        and existing_bundle.get("source") != new_bundle.get("source")
+        and existing_signature != new_signature
+    ):
+        conflict_messages.append(
+            f"跨来源作者—单位关系不一致或单位文本无法确认等价：{existing_bundle.get('source')} vs {new_bundle.get('source')}"
+        )
+    selected = new_bundle if _author_bundle_score(new_bundle) > _author_bundle_score(existing_bundle) else existing_bundle
+    selected = dict(selected)
+    selected["conflicts"] = _unique_values(conflict_messages)
+    return selected
+
+
+def _make_correspondence_bundle(relations, source, name_source="", affiliation_source="", conflicts=None, raw_name="", raw_affiliations=""):
+    clean_relations = []
+    for relation in relations or []:
+        name = normalize_author_display_name(relation.get("name", ""))
+        if not name:
+            continue
+        clean_relations.append({
+            "name": name,
+            "affiliations": _unique_values(
+                _clean_affiliation(affiliation)
+                for affiliation in relation.get("affiliations", [])
+                if _clean_affiliation(affiliation)
+            ),
+        })
+    return {
+        "relations": clean_relations,
+        "source": str(source or ""),
+        "name_source": str(name_source or source or ""),
+        "affiliation_source": str(affiliation_source or source or ""),
+        "conflicts": _unique_values(conflicts or []),
+        "raw_name": str(raw_name or "").strip(),
+        "raw_affiliations": str(raw_affiliations or "").strip(),
+    }
+
+
+def _render_correspondence_bundle(bundle):
+    relations = bundle.get("relations", [])
+    names = _unique_values(relation["name"] for relation in relations)
+    affiliations = _unique_values(
+        affiliation for relation in relations for affiliation in relation.get("affiliations", [])
+    )
+    return {
+        "通讯作者": "; ".join(names) or bundle.get("raw_name", ""),
+        "通讯作者单位": "; ".join(affiliations) or bundle.get("raw_affiliations", ""),
+        CORRESPONDENCE_NAME_SOURCE_COLUMN: bundle.get("name_source", ""),
+        CORRESPONDENCE_AFFILIATION_SOURCE_COLUMN: bundle.get("affiliation_source", ""),
+        CORRESPONDENCE_CONFLICT_COLUMN: "；".join(bundle.get("conflicts", [])),
+    }
+
+
+def apply_correspondence_bundle(record, bundle):
+    record.update(_render_correspondence_bundle(bundle))
+    record[CORRESPONDENCE_RELATIONS_KEY] = bundle
+    return record
+
+
+def _correspondence_bundle_from_record(record):
+    stored = record.get(CORRESPONDENCE_RELATIONS_KEY)
+    if isinstance(stored, dict):
+        return stored
+    name = str(record.get("通讯作者", "") or "").strip()
+    affiliations = split_semicolon_values(record.get("通讯作者单位", ""))
+    relations = [{"name": name, "affiliations": affiliations}] if name else []
+    source = record.get("来源库", "")
+    return _make_correspondence_bundle(
+        relations,
+        source,
+        record.get(CORRESPONDENCE_NAME_SOURCE_COLUMN) or source,
+        record.get(CORRESPONDENCE_AFFILIATION_SOURCE_COLUMN) or source,
+        split_semicolon_values(record.get(CORRESPONDENCE_CONFLICT_COLUMN, "")),
+        raw_name=name,
+        raw_affiliations=record.get("通讯作者单位", ""),
+    )
+
+
+def _correspondence_bundle_score(bundle):
+    complete = [relation for relation in bundle.get("relations", []) if relation.get("affiliations")]
+    return len(complete), len(bundle.get("relations", [])), _source_priority(bundle.get("source"))
+
+
+def _correspondence_signature(bundle):
+    return {
+        _author_identity_key(relation["name"]): tuple(sorted(_affiliation_key(affiliation) for affiliation in relation.get("affiliations", []) if _affiliation_key(affiliation)))
+        for relation in bundle.get("relations", [])
+        if _author_identity_key(relation["name"]) and relation.get("affiliations")
+    }
+
+
+def merge_correspondence_bundles(existing_bundle, new_bundle):
+    existing_signature = _correspondence_signature(existing_bundle)
+    new_signature = _correspondence_signature(new_bundle)
+    conflict_messages = _unique_values([
+        *existing_bundle.get("conflicts", []), *new_bundle.get("conflicts", []),
+    ])
+    if (
+        existing_signature
+        and new_signature
+        and existing_bundle.get("source") != new_bundle.get("source")
+        and existing_signature != new_signature
+    ):
+        conflict_messages.append(
+            f"跨来源通讯作者—单位关系不一致或单位文本无法确认等价：{existing_bundle.get('source')} vs {new_bundle.get('source')}"
+        )
+    selected = new_bundle if _correspondence_bundle_score(new_bundle) > _correspondence_bundle_score(existing_bundle) else existing_bundle
+    selected = dict(selected)
+    selected["conflicts"] = _unique_values(conflict_messages)
+    return selected
 
 def count_authors(author_text):
     authors = split_semicolon_values(author_text)
@@ -543,49 +942,41 @@ def process_scopus_row(row):
     if not master_aff_list and auth_with_aff_str:
         master_aff_list = extract_scopus_affiliations_from_authors(auth_with_aff_str)
         aff_dict = {aff: idx + 1 for idx, aff in enumerate(master_aff_list)}
-    formatted_affils = format_indexed_affiliations(master_aff_list)
-
-    formatted_authors = []
-    for i, name in enumerate(full_names):
-        indices = []
-        if i < len(auth_entries):
-            entry = auth_entries[i]
-            indices = match_author_affiliations(entry, aff_dict, master_aff_list)
-        if indices:
-            formatted_authors.append(f"{name}({','.join(map(str, indices))})")
-        else:
-            formatted_authors.append(name)
-
-   
-    first_author_name = full_names[0] if full_names else ""
-    first_author_affs = ""
-
-    if full_names and len(auth_entries) > 0:
-        first_entry = auth_entries[0]
-        indices = match_author_affiliations(first_entry, aff_dict, master_aff_list)
-        if indices:
-            first_author_affs = "; ".join([aff for aff, idx in aff_dict.items() if idx in indices])
-    
-    if not first_author_affs and master_aff_list:
-        first_author_affs = master_aff_list[0]
-        
-    if not first_author_affs and auth_with_aff_str:
-        first_entry = auth_entries[0] if auth_entries else ""
-        parts = first_entry.split(",", 1)
-        if len(parts) > 1:
-            first_author_affs = parts[1].strip()
-
+    author_bundle = build_scopus_author_bundle(full_names, auth_entries, master_aff_list)
     corr_str = safe_get(row, ["Correspondence Address", "通讯地址", "通信地址", "通讯作者地址", "联系地址"])
-    corr_author_name, corr_author_affs = parse_scopus_correspondence(corr_str, full_names)
-    if not corr_author_name:
-        corr_author_name = safe_get(row, ["Corresponding Author", "通讯作者"])
-    # The dedicated correspondence field remains authoritative whenever it is
-    # present.  Only fill from author-affiliation entries when that raw field
-    # is genuinely blank, never when it merely lacks a parseable institution.
-    if corr_author_name and not corr_author_affs and not corr_str:
-        corr_author_affs = scopus_corresponding_author_affiliations(
-            corr_author_name, auth_entries, aff_dict, master_aff_list
-        )
+    declared_corresponding_author = safe_get(row, ["Corresponding Author", "通讯作者"])
+    corr_relations, corr_conflicts = parse_scopus_correspondence_relations(corr_str, full_names)
+    corr_name_source = "SCOPUS: Correspondence Address" if corr_relations else ""
+    corr_affiliation_source = "SCOPUS: Correspondence Address" if corr_relations else ""
+    raw_corr_name = ""
+    if not corr_relations and declared_corresponding_author:
+        resolved_name, reason = resolve_full_author_name(declared_corresponding_author, full_names)
+        if resolved_name:
+            linked_affiliations = []
+            # This fallback uses only the same Scopus row, and only when the
+            # dedicated correspondence address itself is blank.
+            if not corr_str:
+                for relation in author_bundle["relations"]:
+                    if relation["name"] == resolved_name:
+                        linked_affiliations = relation["affiliations"]
+                        break
+            corr_relations = [{"name": resolved_name, "affiliations": linked_affiliations}]
+            corr_name_source = "SCOPUS: Corresponding Author"
+            corr_affiliation_source = (
+                "SCOPUS: Authors with affiliations" if linked_affiliations else ""
+            )
+        else:
+            raw_corr_name = declared_corresponding_author
+            if full_names and reason:
+                corr_conflicts.append(reason)
+    corr_bundle = _make_correspondence_bundle(
+        corr_relations,
+        "SCOPUS",
+        corr_name_source or ("SCOPUS: Corresponding Author" if raw_corr_name else ""),
+        corr_affiliation_source,
+        corr_conflicts,
+        raw_name=raw_corr_name,
+    )
 
     date_val = normalize_date(safe_get(row, ["Year", "年份", "日期"]))
     lang_raw = safe_get(row, ["Language of Original Document", "文献原始语言", "语种", "原始文献语言"])
@@ -598,12 +989,9 @@ def process_scopus_row(row):
     else:
         page_val = safe_get(row, ["Art. No.", "文章编号", "论文编号"])
 
-    return {
+    record = {
         "DOI": normalize_doi(safe_get(row, ["DOI", "数字对象唯一标识符"])),
         "题名": safe_get(row, ["Title", "Document title", "标题", "文献标题", "Article Title"]),
-        "作者": "; ".join(formatted_authors),
-        "第一作者单位": first_author_affs,
-        "通讯作者单位": corr_author_affs,
         "发表日期": date_val,
         "发表期刊": safe_get(row, ["Source title", "来源出版物名称", "期刊"]),
         "ISSN": safe_get(row, ["ISSN"]),
@@ -620,16 +1008,16 @@ def process_scopus_row(row):
         "原始文献类型": safe_get(row, ["Document Type", "文献类型"]),
         "发表状态": normalize_publication_status(safe_get(row, ["Publication Stage", "出版阶段"])),
         "参考文献": safe_get(row, ["References", "参考文献"]),
-        "通讯作者": corr_author_name,
         "SCOPUS_ID": safe_get(row, ["EID"]),
         "SCOPUSEID": safe_get(row, ["EID"]),
         "页数": safe_get(row, ["Page count", "页数"]),
-        "作者单位": formatted_affils,
-        "第一作者": first_author_name,
         "Scopus被引次数": safe_get(row, ["Cited by", "被引次数", "施引文献"]),
         "Scopus学科分类": safe_get(row, ["Subject Areas", "Scopus Subject Areas", "Scopus学科分类"]),
         "来源库": "SCOPUS",
     }
+    apply_author_bundle(record, author_bundle)
+    apply_correspondence_bundle(record, corr_bundle)
+    return record
 
 
 # WOS 处理逻
@@ -652,18 +1040,14 @@ def process_wos_row(row):
 
     addresses = safe_get(row, ["Addresses", "C1", "作者单位"])
     
-    formatted_authors = authors_af
-    formatted_affils = addresses
-    first_author_aff = ""
-
+    author_relations = [{"name": author, "affiliations": []} for author in af_list]
+    linked_affiliations = []
+    unlinked_affiliations = []
+    author_conflicts = []
     if addresses and '[' in addresses:
         pattern = re.compile(r'\[(.*?)\]\s*([^\[]+)')
         matches = pattern.findall(addresses)
         if matches:
-            affil_list = []
-            author_affil_map = {}
-            
-            unlinked_affils = []
             for authors_in_bracket, affil_text in matches:
                 # A bracketed author list only proves the association with the
                 # immediately following address. Some legacy WOS records mix
@@ -674,70 +1058,43 @@ def process_wos_row(row):
                 if not affil_parts:
                     continue
                 affil = affil_parts[0]
-                unlinked_affils.extend(affil_parts[1:])
-                if affil not in affil_list:
-                    affil_list.append(affil)
-                affil_idx = affil_list.index(affil) + 1
-                
+                linked_affiliations.append(affil)
+                unlinked_affiliations.extend(affil_parts[1:])
                 for au in authors_in_bracket.split(';'):
-                    au_key = normalize_author_match_key(au)
-                    if not au_key:
+                    resolved_name, reason = resolve_full_author_name(au, af_list)
+                    if not resolved_name:
+                        if reason:
+                            author_conflicts.append(
+                                reason.replace("通讯作者姓名", "WOS 作者—单位姓名")
+                            )
                         continue
-                    if au_key not in author_affil_map:
-                        author_affil_map[au_key] = []
-                    author_affil_map[au_key].append(affil_idx)
-
-            last_name_affil_map = {}
-            last_name_conflicts = set()
-            for authors_in_bracket, _ in matches:
-                for au in authors_in_bracket.split(';'):
-                    au_key = normalize_author_match_key(au)
-                    last_key = normalize_author_last_key(au)
-                    if not au_key or not last_key:
-                        continue
-                    indices = tuple(sorted(set(author_affil_map.get(au_key, []))))
-                    if last_key in last_name_affil_map and last_name_affil_map[last_key] != indices:
-                        last_name_conflicts.add(last_key)
-                    else:
-                        last_name_affil_map[last_key] = indices
-            
-            fmt_aus = []
-            for au in af_list:
-                au_key = normalize_author_match_key(au)
-                indices = author_affil_map.get(au_key)
-                last_key = normalize_author_last_key(au)
-                if not indices and last_key and last_key not in last_name_conflicts:
-                    indices = list(last_name_affil_map.get(last_key, ()))
-                if indices:
-                    idx_str = ",".join(map(str, sorted(set(indices))))
-                    fmt_aus.append(f"{au} ({idx_str})")
-                else:
-                    fmt_aus.append(au)
-            
-            formatted_authors = "; ".join(fmt_aus)
-            formatted_affils = "; ".join(
-                [f"({i+1}) {aff}" for i, aff in enumerate(affil_list)] + unlinked_affils
-            )
-            
-            if af_list:
-                first_key = normalize_author_match_key(af_list[0])
-                first_indices = author_affil_map.get(first_key)
-                first_last_key = normalize_author_last_key(af_list[0])
-                if not first_indices and first_last_key and first_last_key not in last_name_conflicts:
-                    first_indices = list(last_name_affil_map.get(first_last_key, ()))
-                if first_indices:
-                    first_author_aff = "; ".join(
-                        affil_list[idx - 1]
-                        for idx in sorted(set(first_indices))
-                        if 0 < idx <= len(affil_list)
-                    )
+                    for relation in author_relations:
+                        if relation["name"] == resolved_name:
+                            relation["affiliations"].append(affil)
+                            break
+    elif addresses:
+        # Bare WOS addresses are retained for reference but are not promoted
+        # into an author relation or artificial numbered affiliation list.
+        unlinked_affiliations = split_semicolon_values(addresses)
+    author_bundle = _make_author_bundle(
+        author_relations,
+        linked_affiliations,
+        "WOS",
+        "Addresses/C1",
+        author_conflicts,
+        marker_space=True,
+        unlinked_affiliations=unlinked_affiliations,
+        index_affiliations=bool(linked_affiliations),
+    )
     # A legacy WOS Addresses field may list institutions without author tags.
     # Its first address is not evidence that it belongs to the first author.
 
     # 提取通讯作者全名及单位
     rp_address = safe_get(row, ["Reprint Addresses", "RP", "通讯地址"])
-    corr_author = ""
-    corr_author_aff = ""
+    corr_relations = []
+    corr_conflicts = []
+    raw_corr_name = ""
+    raw_corr_affiliations = ""
     if rp_address:
         rp_lower = rp_address.lower()
         if "(corresponding author)" in rp_lower or "(reprint author)" in rp_lower:
@@ -745,21 +1102,26 @@ def process_wos_row(row):
             idx2 = rp_address.find(')', idx)
             if idx != -1 and idx2 != -1:
                 corr_author_short = rp_address[:idx].strip()
-                corr_author_aff = rp_address[idx2+1:].strip()
-                if corr_author_aff.startswith(","):
-                    corr_author_aff = corr_author_aff[1:].strip()
-                
-                # 匹配全名
-                corr_author = corr_author_short
-                if corr_author_short and af_list:
-                    short_last = corr_author_short.split(",")[0].strip().lower()
-                    for au_full in af_list:
-                        au_full_last = au_full.split(",")[0].strip().lower()
-                        if short_last == au_full_last or short_last in au_full_last:
-                            corr_author = au_full
-                            break
+                corr_author_aff = rp_address[idx2+1:].strip().lstrip(",").strip()
+                resolved_name, reason = resolve_full_author_name(corr_author_short, af_list)
+                if resolved_name:
+                    corr_relations.append({"name": resolved_name, "affiliations": [corr_author_aff]})
+                else:
+                    raw_corr_name = corr_author_short
+                    raw_corr_affiliations = corr_author_aff
+                    if reason:
+                        corr_conflicts.append(reason)
         else:
-            corr_author_aff = rp_address
+            raw_corr_affiliations = rp_address
+    corr_bundle = _make_correspondence_bundle(
+        corr_relations,
+        "WOS",
+        "WOS: Reprint Addresses" if corr_relations or raw_corr_name else "",
+        "WOS: Reprint Addresses" if corr_relations or raw_corr_affiliations else "",
+        corr_conflicts,
+        raw_name=raw_corr_name,
+        raw_affiliations=raw_corr_affiliations,
+    )
 
     lang_raw = safe_get(row, ["Language", "LA", "语种"])
     lang = translate_language(lang_raw)
@@ -785,12 +1147,6 @@ def process_wos_row(row):
         "URL": "",
         "语种": lang,
         "发表日期": final_date,
-        "作者": formatted_authors,
-        "第一作者": first_author,
-        "通讯作者": corr_author,
-        "通讯作者单位": corr_author_aff,
-        "第一作者单位": first_author_aff,
-        "作者单位": formatted_affils,
     }
 
     record["题名"] = safe_get(row, ["Article Title", "Title", "TI"])
@@ -807,6 +1163,8 @@ def process_wos_row(row):
         safe_get(row, ["Publication Status", "Publication Stage"])
     )
 
+    apply_author_bundle(record, author_bundle)
+    apply_correspondence_bundle(record, corr_bundle)
     return record
 
 
@@ -878,8 +1236,27 @@ def merge_document_types(existing_value, new_value) -> str:
 
 
 def merge_records(existing, new_data):
+    # Author markers are only meaningful with the exact affiliation list that
+    # produced them.  Select one complete relationship bundle, then regenerate
+    # both columns from that bundle so source-local numbers can never leak into
+    # another source's unit list.
+    merged_author_bundle = merge_author_bundles(
+        _author_bundle_from_record(existing),
+        _author_bundle_from_record(new_data),
+    )
+    apply_author_bundle(existing, merged_author_bundle)
+
+    # Treat a corresponding author and its affiliation as one evidence unit as
+    # well; never let the historical Scopus name preference overwrite only half
+    # of a WOS correspondence pair.
+    merged_correspondence_bundle = merge_correspondence_bundles(
+        _correspondence_bundle_from_record(existing),
+        _correspondence_bundle_from_record(new_data),
+    )
+    apply_correspondence_bundle(existing, merged_correspondence_bundle)
+
     for key, val in new_data.items():
-        if key == "DOI":
+        if key == "DOI" or key in {AUTHOR_RELATIONS_KEY, CORRESPONDENCE_RELATIONS_KEY}:
             continue
         if val is None:
             continue
@@ -904,17 +1281,7 @@ def merge_records(existing, new_data):
             if not val:
                 continue
 
-        if key == "作者":
-            existing_marker_count = count_author_affiliation_markers(existing.get(key, ""))
-            new_marker_count = count_author_affiliation_markers(val)
-            if new_marker_count > existing_marker_count:
-                existing[key] = val
-            elif key not in existing or not existing[key] or str(existing[key]) in ["nan", "nan-nan", "-"]:
-                existing[key] = val
-            continue
-
-        if key == "通讯作者" and "SCOPUS" in str(new_data.get("来源库", "")).upper():
-            existing[key] = val
+        if key in AUTHOR_RELATION_OUTPUT_FIELDS or key in CORRESPONDENCE_OUTPUT_FIELDS:
             continue
 
         if key not in existing or not existing[key] or str(existing[key]) in ["nan", "nan-nan", "-"]:

@@ -801,6 +801,10 @@ def _author_metadata_review_issues(row) -> tuple[list[str], list[str]]:
             reasons.append("作者—单位关联不完整")
             fields.append("作者—单位关联")
 
+    if _text(row.get("作者—单位关联冲突原因", "")):
+        reasons.append("作者—单位关联存在冲突")
+        fields.append("作者—单位关联")
+
     if authors:
         corresponding_author = _text(row.get("通讯作者", ""))
         corresponding_affiliation = _text(row.get("通讯作者单位", ""))
@@ -810,6 +814,10 @@ def _author_metadata_review_issues(row) -> tuple[list[str], list[str]]:
         elif not corresponding_affiliation:
             reasons.append("缺少通讯作者单位")
             fields.append("通讯作者单位")
+
+    if _text(row.get("通讯作者—单位关联冲突原因", "")):
+        reasons.append("通讯作者—单位关联存在冲突")
+        fields.append("通讯作者—单位关联")
 
     return reasons, fields
 
