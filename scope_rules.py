@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from metadata_completion import author_parts
+
 from claim_mapping import (
     AFFILIATION_COLUMNS,
     EMAIL_COLUMNS,
@@ -753,7 +755,7 @@ def _split_semicolon_values(value) -> list[str]:
 
 
 def _has_affiliation_index(value: str) -> bool:
-    return bool(re.search(r"\s?\(\d+(?:,\d+)*\)\s*$", value))
+    return bool(re.search(r"\s?\(\d+(?:\s*[,，]\s*\d+)*\)\s*$", value))
 
 
 def _has_original_lookup_target(row) -> bool:
@@ -797,7 +799,7 @@ def _author_metadata_review_issues(row) -> tuple[list[str], list[str]]:
         if indexed_author_count == 0:
             reasons.append("作者—单位关联缺失")
             fields.append("作者—单位关联")
-        elif indexed_author_count < len(authors) or unindexed_affiliations:
+        elif indexed_author_count < len(authors) or unindexed_affiliations or _missing_author_links(row):
             reasons.append("作者—单位关联不完整")
             fields.append("作者—单位关联")
 
@@ -822,8 +824,30 @@ def _author_metadata_review_issues(row) -> tuple[list[str], list[str]]:
     return reasons, fields
 
 
+def _missing_author_links(row):
+    unit_ids = {
+        int(m[1]) for a in _split_semicolon_values(row.get("作者单位", ""))
+        if (m := re.match(r"^\((\d+)\)\s+", a))
+    }
+    return [
+        name for a in _split_semicolon_values(row.get("作者", ""))
+        for name, ids in [author_parts(a)]
+        if not ids or any(i not in unit_ids for i in ids)
+    ]
+
+
+def _review_detail(row):
+    missing = _missing_author_links(row)
+    if not missing:
+        return ""
+    # Keep long collaboration author lists readable without hiding the total.
+    names = "；".join(missing[:20])
+    suffix = f"等 {len(missing)} 位作者" if len(missing) > 20 else ""
+    return f" 尚待核验作者—单位：{names}{suffix}。"
+
+
 def _review_frame(columns, rows: list[dict]) -> pd.DataFrame:
-    review_columns = [*columns, REVIEW_REASON_COLUMN, REVIEW_FIELDS_COLUMN, REVIEW_PATH_COLUMN]
+    review_columns = [*columns, REVIEW_REASON_COLUMN, REVIEW_FIELDS_COLUMN, REVIEW_PATH_COLUMN, "原文链接"]
     return pd.DataFrame(rows, columns=review_columns)
 
 
@@ -869,15 +893,21 @@ def split_output_frames(df: pd.DataFrame) -> dict:
             continue
 
         record = row.to_dict()
+        doi = _text(row.get("DOI", ""))
+        url = _text(row.get("URL", ""))
+        record["原文链接"] = (
+            "https://doi.org/" + doi if re.match(r"^10\.\d{4,9}/\S+$", doi, re.I)
+            else url if re.match(r"^https?://[^\s]+$", url, re.I) else ""
+        )
         if original_reasons and not other_reasons and _has_original_lookup_target(row):
             record[REVIEW_REASON_COLUMN] = "；".join(original_reasons)
             record[REVIEW_FIELDS_COLUMN] = "；".join(dict.fromkeys([*fields, *other_fields]))
-            record[REVIEW_PATH_COLUMN] = "查论文原文或出版社页面；仅在存在明确作者上标、单位映射或 Corresponding author 标记时补全。"
+            record[REVIEW_PATH_COLUMN] = "查论文原文或出版社页面；仅在存在明确作者上标、单位映射或 Corresponding author 标记时补全。" + _review_detail(row)
             original_paper_rows.append(record)
         else:
             record[REVIEW_REASON_COLUMN] = "；".join([reason for reason in [*original_reasons, *other_reasons] if reason])
             record[REVIEW_FIELDS_COLUMN] = "；".join(dict.fromkeys([*fields, *other_fields]))
-            record[REVIEW_PATH_COLUMN] = "核对原始来源、别名表或文献类型；缺少明确证据时不作猜测补全。"
+            record[REVIEW_PATH_COLUMN] = "核对原始来源、别名表或文献类型；缺少明确证据时不作猜测补全。" + _review_detail(row)
             other_review_rows.append(record)
 
     original_paper_review_df = _review_frame(df.columns.tolist(), original_paper_rows)

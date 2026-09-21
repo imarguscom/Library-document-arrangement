@@ -7,6 +7,13 @@ from time import sleep
 
 import requests
 
+from metadata_completion import (
+    EVIDENCE_COLUMN,
+    complete_ei_record,
+    complete_scopus_record,
+    complete_wos_record,
+)
+
 from claim_mapping import build_publication_name_to_email, normalize_name
 from scope_rules import (
     SCOPE_COLUMNS,
@@ -28,7 +35,7 @@ TARGET_COLUMNS = [
     "页数", "CNKI学科分类", "网络首发", "中图分类号", "作者单位", "第一作者",
     "作者—单位关联来源", "作者—单位关联冲突原因",
     "已认领作者", "Scopus被引次数", "SCI被引次数", "CSCD被引次数", "影响因子",
-    "5年平均影响因子", "所属专题", "发文作者类型"
+    "5年平均影响因子", "所属专题", "发文作者类型", EVIDENCE_COLUMN
 ]
 
 CLAIM_COLUMN = "作品认领"
@@ -1017,7 +1024,7 @@ def process_scopus_row(row):
     }
     apply_author_bundle(record, author_bundle)
     apply_correspondence_bundle(record, corr_bundle)
-    return record
+    return apply_source_completion(record, row, complete_scopus_record)
 
 
 # WOS 处理逻
@@ -1165,7 +1172,7 @@ def process_wos_row(row):
 
     apply_author_bundle(record, author_bundle)
     apply_correspondence_bundle(record, corr_bundle)
-    return record
+    return apply_source_completion(record, row, complete_wos_record)
 
 
 #  EI 
@@ -1185,7 +1192,7 @@ def process_ei_row(row):
     affiliations = safe_get(row, ["Author affiliation", "Author Affiliation", "Affiliation", "作者单位", "机构"])
     first_author_aff = affiliations.split(";")[0].strip() if affiliations else ""
 
-    return {
+    record = {
         "DOI": doi,
         "题名": safe_get(row, ["Title"]),
         "作者": authors,
@@ -1209,6 +1216,29 @@ def process_ei_row(row):
         "收录类别": "EI",
         "来源库": "EI",
     }
+    return apply_source_completion(record, row, complete_ei_record)
+
+
+def apply_source_completion(record, row, completion):
+    """Keep derived display values and merge-time evidence bundles synchronized."""
+    before = (record.get("作者", ""), record.get("作者单位", ""))
+    completion(record, row)
+    if before != (record.get("作者", ""), record.get("作者单位", "")):
+        record.pop(AUTHOR_RELATIONS_KEY, None)
+        bundle = _author_bundle_from_record(record)
+        bundle["evidence"] = record.get(EVIDENCE_COLUMN, "")
+        record[AUTHOR_RELATIONS_KEY] = bundle
+        record[AUTHOR_RELATION_SOURCE_COLUMN] = bundle["source"]
+    if completion is complete_ei_record and record.get("通讯作者"):
+        relations = record.pop("_ei_completed_correspondence", [])
+        record[CORRESPONDENCE_RELATIONS_KEY] = _make_correspondence_bundle(
+            relations, "EI", "EI: Corresponding author(s)",
+            "EI: Author / Author affiliation" if relations else "",
+            raw_name=record["通讯作者"],
+        )
+        record[CORRESPONDENCE_NAME_SOURCE_COLUMN] = "EI: Corresponding author(s)"
+        record[CORRESPONDENCE_AFFILIATION_SOURCE_COLUMN] = "EI: Author / Author affiliation" if relations else ""
+    return record
 
 
 def count_author_affiliation_markers(author_text):
@@ -1266,6 +1296,13 @@ def merge_records(existing, new_data):
 
         if key == "原始文献类型":
             existing[key] = merge_document_types(existing.get(key, ""), sval)
+            continue
+
+        if key == EVIDENCE_COLUMN:
+            existing[key] = "；".join(dict.fromkeys(
+                note for value in (existing.get(key, ""), sval)
+                for note in str(value).split("；") if note
+            ))
             continue
 
         if key in ["收录类别", "来源库", "WOS记录号", "WOS研究方向", "WOS类目"]:
