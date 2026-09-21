@@ -92,6 +92,73 @@ def test_process_scopus_row_extracts_multiple_corresponding_authors():
     assert "B.Z. Tang" not in record["通讯作者单位"]
 
 
+def test_process_scopus_row_uses_author_affiliation_entry_for_corresponding_author_unit():
+    row = pd.Series(
+        {
+            "DOI": "10.1000/scopus-corresponding-affiliation",
+            "Title": "Scopus Corresponding Author Affiliation Test",
+            "Author full names": "Du, Jian; Xing, Weiwei; Li, Ming",
+            "Affiliations": (
+                "Beijing Jiaotong University, Beijing, China; "
+                "Guangdong Laboratory of Artificial Intelligence, Shenzhen, China"
+            ),
+            "Authors with affiliations": (
+                "Du J. (Beijing Jiaotong University, Beijing, China); "
+                "Xing W. (Beijing Jiaotong University, Beijing, China); "
+                "Li M. (Guangdong Laboratory of Artificial Intelligence, Shenzhen, China)"
+            ),
+            "Corresponding Author": "Xing, Weiwei",
+            "Correspondence Address": "",
+            "EID": "2-s2.0-corresponding-affiliation",
+        }
+    )
+
+    record = process_scopus_row(row)
+
+    assert record["通讯作者"] == "Xing, Weiwei"
+    assert record["通讯作者单位"] == "Beijing Jiaotong University, Beijing, China"
+
+
+def test_process_scopus_row_keeps_ambiguous_initial_match_unresolved():
+    row = pd.Series(
+        {
+            "DOI": "10.1000/scopus-ambiguous-corresponding-affiliation",
+            "Title": "Ambiguous Scopus Corresponding Author Test",
+            "Author full names": "Li, Ming; Li, Mei",
+            "Affiliations": "Institute A; Institute B",
+            "Authors with affiliations": "Li M. (Institute A); Li M. (Institute B)",
+            "Corresponding Author": "Li, Ming",
+            "Correspondence Address": "",
+            "EID": "2-s2.0-ambiguous-corresponding-affiliation",
+        }
+    )
+
+    record = process_scopus_row(row)
+
+    assert record["通讯作者"] == "Li, Ming"
+    assert record["通讯作者单位"] == ""
+
+
+def test_process_scopus_row_does_not_override_present_correspondence_address():
+    row = pd.Series(
+        {
+            "DOI": "10.1000/scopus-present-correspondence-address",
+            "Title": "Present Scopus Correspondence Address Test",
+            "Author full names": "Du, Jian; Xing, Weiwei",
+            "Affiliations": "Institute A; Institute B",
+            "Authors with affiliations": "Du J. (Institute A); Xing W. (Institute B)",
+            "Corresponding Author": "Xing, Weiwei",
+            "Correspondence Address": "Xing, W.; email: xing@example.org",
+            "EID": "2-s2.0-present-correspondence-address",
+        }
+    )
+
+    record = process_scopus_row(row)
+
+    assert record["通讯作者"] == "Xing, Weiwei"
+    assert record["通讯作者单位"] == ""
+
+
 def test_process_scopus_row_handles_frontend_parenthesized_affiliations():
     row = pd.Series(
         {

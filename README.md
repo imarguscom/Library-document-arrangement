@@ -161,6 +161,10 @@ src/博文阁用户别名表.xlsx
 
 不填写 API Key 时，主流程仍可正常清洗、合并和导出，只是跳过学科补充。
 
+## Scopus 通讯作者单位
+
+优先采用 `Correspondence Address` 中明确给出的通讯作者单位。若该字段为空，但同一条记录同时有 `Corresponding Author` 和 `Authors with affiliations`，系统仅在姓氏和名字首字母唯一对应时补全单位；存在同姓同首字母歧义时保持为空并进入待复核，不作猜测。
+
 ## 项目结构
 
 ```text

@@ -241,6 +241,92 @@ def affiliations_from_scopus_author_entry(entry):
     parts = entry.split(",", 1)
     return [parts[1].strip()] if len(parts) > 1 and parts[1].strip() else []
 
+
+def scopus_author_entry_name(entry):
+    """Extract the abbreviated author name from one Scopus affiliation entry."""
+    text = str(entry or "").strip()
+    if not text:
+        return ""
+    if "(" in text:
+        return text.split("(", 1)[0].strip(" ,;")
+    return text.split(",", 1)[0].strip()
+
+
+def scopus_author_name_parts(name):
+    """Return a conservative (surname, initials) key for Scopus name variants."""
+    text = normalize_author_display_name(name)
+    if not text:
+        return "", ""
+    if "," in text:
+        surname, given = text.split(",", 1)
+        surname_tokens = re.findall(r"[A-Za-z0-9]+", surname.lower())
+        given_tokens = re.findall(r"[A-Za-z0-9]+", given.lower())
+    else:
+        tokens = re.findall(r"[A-Za-z0-9]+", text.lower())
+        if len(tokens) < 2:
+            return (tokens[0], "") if tokens else ("", "")
+        # Scopus affiliation entries are normally "Surname I.".  The
+        # correspondence-address variant can instead be "I. Surname".
+        if len(tokens[0]) == 1:
+            surname_tokens = [tokens[-1]]
+            given_tokens = tokens[:-1]
+        else:
+            surname_tokens = [tokens[0]]
+            given_tokens = tokens[1:]
+    surname_key = "".join(surname_tokens)
+    initials = "".join(token[0] for token in given_tokens if token)
+    return surname_key, initials
+
+
+def scopus_author_names_match(left, right):
+    """Match only same-record Scopus names with the same surname and initials."""
+    left_surname, left_initials = scopus_author_name_parts(left)
+    right_surname, right_initials = scopus_author_name_parts(right)
+    return bool(
+        left_surname
+        and right_surname
+        and left_initials
+        and right_initials
+        and left_surname == right_surname
+        and left_initials == right_initials
+    )
+
+
+def scopus_corresponding_author_affiliations(corresponding_authors, auth_entries, aff_dict, master_aff_list):
+    """Resolve a corresponding author's units only when every match is unique.
+
+    Scopus front-end exports can give Corresponding Author without
+    Correspondence Address, while Authors with affiliations still contains
+    author-level affiliations.  We reuse that same-record evidence and never
+    choose between duplicate surname/initial candidates.
+    """
+    author_names = split_semicolon_values(corresponding_authors)
+    if not author_names or not auth_entries:
+        return ""
+
+    resolved_affiliations = []
+    for author_name in author_names:
+        candidates = [
+            entry for entry in auth_entries
+            if scopus_author_names_match(author_name, scopus_author_entry_name(entry))
+        ]
+        if len(candidates) != 1:
+            return ""
+
+        entry = candidates[0]
+        indices = match_author_affiliations(entry, aff_dict, master_aff_list)
+        affiliations = [aff for aff, idx in aff_dict.items() if idx in indices]
+        if not affiliations:
+            affiliations = affiliations_from_scopus_author_entry(entry)
+        if not affiliations:
+            return ""
+        for affiliation in affiliations:
+            if affiliation not in resolved_affiliations:
+                resolved_affiliations.append(affiliation)
+
+    return "; ".join(resolved_affiliations)
+
+
 def extract_scopus_affiliations_from_authors(auth_with_aff_str):
     affiliations = []
     for entry in split_scopus_author_affiliation_entries(auth_with_aff_str):
@@ -493,6 +579,13 @@ def process_scopus_row(row):
     corr_author_name, corr_author_affs = parse_scopus_correspondence(corr_str, full_names)
     if not corr_author_name:
         corr_author_name = safe_get(row, ["Corresponding Author", "通讯作者"])
+    # The dedicated correspondence field remains authoritative whenever it is
+    # present.  Only fill from author-affiliation entries when that raw field
+    # is genuinely blank, never when it merely lacks a parseable institution.
+    if corr_author_name and not corr_author_affs and not corr_str:
+        corr_author_affs = scopus_corresponding_author_affiliations(
+            corr_author_name, auth_entries, aff_dict, master_aff_list
+        )
 
     date_val = normalize_date(safe_get(row, ["Year", "年份", "日期"]))
     lang_raw = safe_get(row, ["Language of Original Document", "文献原始语言", "语种", "原始文献语言"])
