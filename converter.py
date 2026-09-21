@@ -1229,15 +1229,21 @@ def apply_source_completion(record, row, completion):
         bundle["evidence"] = record.get(EVIDENCE_COLUMN, "")
         record[AUTHOR_RELATIONS_KEY] = bundle
         record[AUTHOR_RELATION_SOURCE_COLUMN] = bundle["source"]
+    elif completion is complete_ei_record:
+        # Carry unresolved original indices even when no display normalization
+        # was possible, so a later DOI merge cannot silently erase the issue.
+        record[AUTHOR_RELATIONS_KEY] = _author_bundle_from_record(record)
     if completion is complete_ei_record and record.get("通讯作者"):
         relations = record.pop("_ei_completed_correspondence", [])
+        has_units = any(relation["affiliations"] for relation in relations)
         record[CORRESPONDENCE_RELATIONS_KEY] = _make_correspondence_bundle(
             relations, "EI", "EI: Corresponding author(s)",
-            "EI: Author / Author affiliation" if relations else "",
+            "EI: Author / Author affiliation" if has_units else "",
+            conflicts=split_semicolon_values(record.get(CORRESPONDENCE_CONFLICT_COLUMN, "")),
             raw_name=record["通讯作者"],
         )
         record[CORRESPONDENCE_NAME_SOURCE_COLUMN] = "EI: Corresponding author(s)"
-        record[CORRESPONDENCE_AFFILIATION_SOURCE_COLUMN] = "EI: Author / Author affiliation" if relations else ""
+        record[CORRESPONDENCE_AFFILIATION_SOURCE_COLUMN] = "EI: Author / Author affiliation" if has_units else ""
     return record
 
 

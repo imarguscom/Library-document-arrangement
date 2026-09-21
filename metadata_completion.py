@@ -57,11 +57,26 @@ def initials_key(value):
 
 def unique_author(candidate, authors):
     """Return an index only for a unique exact or surname/initials match."""
-    exact = [i for i, name in enumerate(authors) if name_key(name) == name_key(candidate)]
+    def exact_key(value):
+        # A comma separates surname from given name; do not erase that boundary.
+        value = unicodedata.normalize("NFKC", value).casefold()
+        return "".join(c for c in value if c.isalnum() or c == ",")
+
+    def abbreviated(value):
+        value = value.replace("，", ",")
+        given = value.split(",", 1)[-1] if "," in value else value
+        tokens = re.findall(r"[^\W\d_]+", given, re.UNICODE)
+        if "," not in value:
+            tokens = tokens[:-1] if all(len(t) == 1 for t in tokens[:-1]) else tokens[1:]
+        # A shared middle initial must not hide two different full given names.
+        return bool(tokens) and all(len(t) == 1 or (t.isupper() and len(t) <= 3) for t in tokens)
+
+    exact = [i for i, name in enumerate(authors) if exact_key(name) == exact_key(candidate)]
     if exact:
         return exact[0] if len(exact) == 1 else None
     key = initials_key(candidate)
-    matches = [i for i, name in enumerate(authors) if key and initials_key(name) == key]
+    matches = [i for i, name in enumerate(authors)
+               if key and initials_key(name) == key and (abbreviated(candidate) or abbreviated(name))]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -93,11 +108,23 @@ def add_evidence(record, note):
     record[EVIDENCE_COLUMN] = "；".join(notes)
 
 
+def add_conflict(record, column, reason):
+    existing = [n for n in text(record.get(column)).split("；") if n]
+    record[column] = "；".join(dict.fromkeys([*existing, reason]))
+
+
 def complete_ei_record(record, row):
     raw_authors = field(row, "Author", "Author(s)", "Authors", "作者")
     raw_affs = field(row, "Author affiliation", "Affiliation", "作者单位", "机构")
     authors = [author_parts(a) for a in values(raw_authors)]
     units = numbered_affiliations(raw_affs)
+    for name, ids in authors:
+        missing = [i for i in ids if not units or i not in units]
+        if missing:
+            add_conflict(record, "作者—单位关联冲突原因",
+                         f"EI 原始编号未解析：{name} 的单位 {','.join(map(str, missing))}")
+    if not units and re.match(r"^\(\d+\)", raw_affs):
+        add_conflict(record, "作者—单位关联冲突原因", "EI 单位编号目录无法唯一解析，保留原始记录待核验")
     if units:
         # Standardize separators for the target format without discarding address text.
         units = {i: re.sub(r"\s*[;；]\s*", ", ", a) for i, a in units.items()}
@@ -124,14 +151,19 @@ def complete_ei_record(record, row):
     resolved = [unique_author(n, names) for n in candidates]
     record["通讯作者"] = "; ".join(dict.fromkeys(names[i] if i is not None else n for n, i in zip(candidates, resolved)))
     record["通讯作者单位"] = ""
+    relations = []
+    for candidate, i in zip(candidates, resolved):
+        known_units = [units[j] for j in authors[i][1] if units and j in units] if i is not None else []
+        relations.append({"name": names[i] if i is not None else candidate, "affiliations": known_units})
+        if i is None:
+            add_conflict(record, "通讯作者—单位关联冲突原因", f"EI 通讯作者尚未唯一匹配：{candidate}")
+        elif not units or not authors[i][1] or any(j not in units for j in authors[i][1]):
+            add_conflict(record, "通讯作者—单位关联冲突原因", f"EI 通讯作者单位尚未补全：{names[i]}")
+    record["_ei_completed_correspondence"] = relations
     add_evidence(record, "EI 通讯作者：Corresponding author(s) 明示姓名")
     if candidates and units and all(i is not None and authors[i][1] and all(j in units for j in authors[i][1]) for i in resolved):
         ids = list(dict.fromkeys(j for i in resolved for j in authors[i][1]))
         record["通讯作者单位"] = "; ".join(units[i] for i in ids)
-        record["_ei_completed_correspondence"] = [
-            {"name": names[i], "affiliations": [units[j] for j in authors[i][1]]}
-            for i in dict.fromkeys(resolved)
-        ]
         add_evidence(record, "EI 通讯作者单位：唯一姓名匹配及原始单位编号")
     return record
 
