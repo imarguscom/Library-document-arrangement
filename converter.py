@@ -737,8 +737,8 @@ def _institution_address_profile(affiliation):
     """Recognize a narrow, explicit institution / subunit / US city layout.
 
     This is comparison-only: never rewrite or transfer source addresses. An
-    unknown school-parent relationship, campus qualifier or country layout
-    stays incomparable rather than being guessed from text similarity.
+    school-only first segment is retained for explicit paired-hierarchy
+    comparison. Unknown parents, campuses and country layouts are not guessed.
     """
     expansions = {
         "univ": "university", "coll": "college", "natl": "national",
@@ -762,9 +762,10 @@ def _institution_address_profile(affiliation):
     if institution == "nber":
         institution = "national bureau economic research"
     org_markers = {"university", "college", "institute"}
-    if not (org_markers.intersection(institution.split()) or institution == "national bureau economic research"):
+    school_only = "school" in institution.split() and not org_markers.intersection(institution.split())
+    if not (org_markers.intersection(institution.split()) or institution == "national bureau economic research" or school_only):
         return None
-    if {"school", "department", "center"}.intersection(institution.split()):
+    if not school_only and {"school", "department", "center"}.intersection(institution.split()):
         return None
     city = parts[-2]
     if any(char.isdigit() for char in city) or org_markers.intersection(city.split()):
@@ -778,25 +779,53 @@ def _institution_address_profile(affiliation):
     return institution, city, state, frozenset(subunits)
 
 
+def _explicit_school_shorthand(long_profile, short_profile):
+    """Verify a shortened school name against the other source's hierarchy.
+
+    Yale University + School of Management -> Yale School of Management.
+    No school-parent dictionary or fuzzy prefix matching is involved.
+    """
+    parent, _, _, units = long_profile
+    short_name, _, _, short_units = short_profile
+    if short_units or "university" not in parent.split() or len(units) != 1:
+        return False
+    unit = next(iter(units))
+    if "school" not in unit.split():
+        return False
+    stem = " ".join(word for word in parent.split() if word != "university")
+    unit = " ".join(word for word in unit.split() if word not in {"the", "of", "at"})
+    return bool(stem) and f"{stem} {unit}" == short_name
+
+
 def _affiliations_equivalent(left, right):
     if _affiliation_key(left) == _affiliation_key(right):
         return True
     a, b = _institution_address_profile(left), _institution_address_profile(right)
-    if not a or not b or a[:2] != b[:2]:
+    if not a or not b or a[1] != b[1]:
         return False
     if a[2] and b[2] and a[2] != b[2]:
         return False
+    if a[0] != b[0]:
+        return _explicit_school_shorthand(a, b) or _explicit_school_shorthand(b, a)
     # Institution-only versus its explicit departments is differing detail;
     # two contradictory, explicitly named department sets remain a review.
     return not a[3] or not b[3] or a[3] == b[3]
 
 
 def _author_bundles_equivalent(left, right):
-    if left.get("unlinked_affiliations") or right.get("unlinked_affiliations"):
-        return False
     a, b = left.get("relations", []), right.get("relations", [])
     if not a or len(a) != len(b):
         return False
+    complete_a = all(relation.get("affiliations") for relation in a)
+    complete_b = all(relation.get("affiliations") for relation in b)
+    if not complete_a and not complete_b:
+        # Selecting one partial bundle would still discard the other's links.
+        return False
+    for source, other in [(left, right), (right, left)]:
+        known = [unit for relation in other.get("relations", []) for unit in relation.get("affiliations", [])]
+        if not all(any(_affiliations_equivalent(unit, candidate) for candidate in known)
+                   for unit in source.get("unlinked_affiliations", [])):
+            return False
     used = set()
     for relation in a:
         candidates = [i for i, other in enumerate(b)
@@ -807,7 +836,9 @@ def _author_bundles_equivalent(left, right):
         other = b[candidates[0]]
         affiliations_a, affiliations_b = relation.get("affiliations", []), other.get("affiliations", [])
         if not affiliations_a or not affiliations_b:
-            return False
+            # Missing evidence does not contradict the complete source. Do
+            # not infer a link from the order of an untagged address list.
+            continue
         # Require coverage in both directions. A genuinely additional
         # institution (e.g. NBER) must never disappear behind a shared one.
         if not (all(any(_affiliations_equivalent(x, y) for y in affiliations_b) for x in affiliations_a)
@@ -819,6 +850,7 @@ def _author_bundles_equivalent(left, right):
 def merge_author_bundles(existing_bundle, new_bundle):
     existing_signature = _author_bundle_signature(existing_bundle)
     new_signature = _author_bundle_signature(new_bundle)
+    compatible = _author_bundles_equivalent(existing_bundle, new_bundle)
     conflict_messages = _unique_values([
         *existing_bundle.get("conflicts", []), *new_bundle.get("conflicts", []),
     ])
@@ -827,12 +859,26 @@ def merge_author_bundles(existing_bundle, new_bundle):
         and new_signature
         and existing_bundle.get("source") != new_bundle.get("source")
         and existing_signature != new_signature
-        and not _author_bundles_equivalent(existing_bundle, new_bundle)
+        and not compatible
     ):
         conflict_messages.append(
             f"跨来源作者—单位关系不一致或单位文本无法确认等价：{existing_bundle.get('source')} vs {new_bundle.get('source')}"
         )
-    selected = new_bundle if _author_bundle_score(new_bundle) > _author_bundle_score(existing_bundle) else existing_bundle
+    def selection_score(bundle):
+        score = _author_bundle_score(bundle)
+        # Only resolve equivalent descriptions by detail. True conflicts keep
+        # their existing selection policy and still enter the review queue.
+        if not compatible:
+            return score
+        hierarchy_details = set()
+        for relation in bundle.get("relations", []):
+            for unit in relation.get("affiliations", []):
+                profile = _institution_address_profile(unit)
+                if profile:
+                    hierarchy_details.update((profile[0], profile[1], subunit) for subunit in profile[3])
+        # Duplicate coarse spellings must not outweigh an explicit hierarchy.
+        return (*score[:2], len(hierarchy_details), *score[2:])
+    selected = new_bundle if selection_score(new_bundle) > selection_score(existing_bundle) else existing_bundle
     selected = dict(selected)
     selected["conflicts"] = _unique_values(conflict_messages)
     return selected

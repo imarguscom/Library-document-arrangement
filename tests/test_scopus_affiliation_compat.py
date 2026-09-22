@@ -135,7 +135,7 @@ def test_original_pair_roundtrip_and_input_order(tmp_path, monkeypatch):
         sheets = pd.read_excel(dest, sheet_name=None, dtype=str)
         sheets = {k: v.fillna('') for k, v in sheets.items()}
         assert {k: len(sheets[k]) for k in ['全部数据', '期刊论文', '会议论文', '待复核_可尝试原文补全', '待复核_其他']} == {
-            '全部数据': 45, '期刊论文': 42, '会议论文': 3, '待复核_可尝试原文补全': 38, '待复核_其他': 0}
+            '全部数据': 45, '期刊论文': 42, '会议论文': 3, '待复核_可尝试原文补全': 34, '待复核_其他': 0}
         out = sheets['全部数据']
         assert out['DOI'].nunique() == 42 and out['DOI'].ne('').all()
         assert out['URL'].str.match(r'^https?://[^\s]+$').all()
@@ -150,6 +150,87 @@ def test_original_pair_roundtrip_and_input_order(tmp_path, monkeypatch):
                 assert journal['WOS记录号'] and journal['SCOPUSEID'] == ''
         assert out.loc[out['DOI'] == '10.1111/jofi.12261', c.AUTHOR_RELATION_CONFLICT_COLUMN].ne('').all()
         assert out.loc[out['DOI'] == '10.1257/aer.101.6.2723', c.AUTHOR_RELATION_CONFLICT_COLUMN].eq('').all()
+        for doi in ['10.1016/j.jfineco.2011.10.005', '10.1111/j.1540-6261.2009.01448.x']:
+            yale = out.loc[out['DOI'] == doi].iloc[0]
+            assert yale[c.AUTHOR_RELATION_CONFLICT_COLUMN] == ''
+            assert yale[c.AUTHOR_RELATION_SOURCE_COLUMN] == 'WOS'
+            assert 'Yale Univ, Sch Management' in yale['作者单位']
         outputs.append(Counter((row['DOI'], tuple(sorted(c.split_semicolon_values(row['原始文献类型']))))
                                for _, row in out.iterrows()))
     assert outputs[0] == outputs[1]
+
+
+def test_explicit_yale_hierarchy_wins_in_both_input_orders():
+    detailed = 'Yale Univ, Sch Management, New Haven, CT 06511 USA'
+    abbreviated = 'Yale School of Management, New Haven, United States'
+    wos, scopus = _bundle([detailed], 'WOS'), _bundle([abbreviated], 'SCOPUS')
+    for left, right in [(wos, scopus), (scopus, wos)]:
+        merged = c.merge_author_bundles(left, right)
+        assert not merged['conflicts']
+        assert merged['source'] == 'WOS'
+        assert merged['relations'] == wos['relations']
+        assert merged['affiliations'] == [detailed]
+
+
+def test_duplicate_coarse_addresses_do_not_outweigh_explicit_hierarchy():
+    detailed = 'Yale Univ, Sch Management, New Haven, CT 06511 USA'
+    wos = _bundle([detailed], 'WOS')
+    scopus = _bundle([
+        'Yale School of Management, New Haven, United States',
+        'Yale School of Management, New Haven, CT 06511 USA'], 'SCOPUS')
+    # Unassigned master-list units do not prove richer author-linked evidence.
+    scopus['affiliations'] += [
+        'Other Univ, Dept Physics, New Haven, CT 06511 USA',
+        'Other Univ, Dept Biology, New Haven, CT 06511 USA']
+    for left, right in [(wos, scopus), (scopus, wos)]:
+        merged = c.merge_author_bundles(left, right)
+        assert not merged['conflicts']
+        assert merged['source'] == 'WOS'
+        assert merged['affiliations'] == [detailed]
+
+
+@pytest.mark.parametrize('short', [
+    'Yale School of Medicine, New Haven, United States',
+    'Yale School of Management, New York, United States',
+    'Yale School of Management, New Haven, IN 46774 USA',
+    'Yale West School of Management, New Haven, United States',
+    'School of Management, New Haven, United States',
+])
+def test_school_shorthand_cannot_hide_a_different_school_or_location(short):
+    full = 'Yale Univ, Sch Management, New Haven, CT 06511 USA'
+    assert not c._affiliations_equivalent(full, short)
+    assert not c._affiliations_equivalent(short, full)
+
+
+def test_complete_source_resolves_missing_links_without_using_position():
+    wos = c._make_author_bundle([
+        {'name': 'Alpha, Alice', 'affiliations': ['Institute A']},
+        {'name': 'Bravo, Bob', 'affiliations': []}],
+        ['Institute A'], 'WOS', unlinked_affiliations=['Institute B'])
+    scopus = c._make_author_bundle([
+        {'name': 'Bravo, Bob', 'affiliations': ['Institute B']},
+        {'name': 'Alpha, Alice', 'affiliations': ['Institute A']}],
+        ['Institute B', 'Institute A'], 'SCOPUS')
+    for left, right in [(wos, scopus), (scopus, wos)]:
+        merged = c.merge_author_bundles(left, right)
+        assert not merged['conflicts']
+        assert merged['relations'] == scopus['relations']
+        assert c._render_author_bundle(merged)['作者'] == 'Bravo, Bob(1); Alpha, Alice(2)'
+    # Already supplied contradictory links must not be mistaken for blanks.
+    conflicting = dict(wos, relations=[
+        {'name': 'Alpha, Alice', 'affiliations': ['Institute C']},
+        {'name': 'Bravo, Bob', 'affiliations': []}])
+    assert c.merge_author_bundles(conflicting, scopus)['conflicts']
+    # An unmatched unlinked unit must not silently disappear either.
+    unmatched = dict(wos, unlinked_affiliations=['Institute C'])
+    assert c.merge_author_bundles(unmatched, scopus)['conflicts']
+
+
+def test_two_partial_sources_are_not_mislabeled_as_one_complete_source():
+    left = c._make_author_bundle([
+        {'name': 'Alpha, Alice', 'affiliations': ['Institute A']},
+        {'name': 'Bravo, Bob', 'affiliations': []}], ['Institute A'], 'WOS')
+    right = c._make_author_bundle([
+        {'name': 'Alpha, Alice', 'affiliations': []},
+        {'name': 'Bravo, Bob', 'affiliations': ['Institute B']}], ['Institute B'], 'SCOPUS')
+    assert c.merge_author_bundles(left, right)['conflicts']
