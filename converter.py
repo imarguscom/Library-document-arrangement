@@ -264,11 +264,27 @@ def affiliations_from_scopus_author_entry(entry):
     entry = str(entry or "").strip()
     if not entry:
         return []
-    match = re.match(r"^.+?\((.*)\)\s*$", entry)
-    if match:
-        return split_semicolon_values(match.group(1))
+    name, body = _scopus_parenthesized_entry(entry)
+    if name:
+        return split_scopus_author_affiliation_entries(body)
     parts = entry.split(",", 1)
     return [parts[1].strip()] if len(parts) > 1 and parts[1].strip() else []
+
+
+def _scopus_parenthesized_entry(entry):
+    """Separate the final balanced address group, not a nickname in the name."""
+    text = str(entry or "").strip()
+    if not text.endswith(")"):
+        return "", ""
+    depth = 0
+    for pos in range(len(text) - 1, -1, -1):
+        if text[pos] == ")":
+            depth += 1
+        elif text[pos] == "(":
+            depth -= 1
+            if depth == 0:
+                return text[:pos].strip(" ,;"), text[pos + 1:-1].strip()
+    return "", ""
 
 
 def scopus_author_entry_name(entry):
@@ -276,33 +292,42 @@ def scopus_author_entry_name(entry):
     text = str(entry or "").strip()
     if not text:
         return ""
-    if "(" in text:
-        return text.split("(", 1)[0].strip(" ,;")
+    name, _ = _scopus_parenthesized_entry(text)
+    if name:
+        return name
     return text.split(",", 1)[0].strip()
+
+
+def _scopus_name_tokens(name):
+    text = normalize_author_display_name(name)
+    if "," in text:
+        surname, given = text.split(",", 1)
+    else:
+        # Keep compound/hyphenated surnames intact. Only unambiguous initial
+        # blocks establish a no-comma boundary; never guess a full-name order.
+        tokens = text.split()
+        def initial_token(token):
+            return bool(re.fullmatch(r"[A-Z](?:\.?[A-Z]){0,3}\.?", token))
+        boundary = len(tokens)
+        while boundary > 0 and initial_token(tokens[boundary - 1]):
+            boundary -= 1
+        if 0 < boundary < len(tokens):
+            surname, given = " ".join(tokens[:boundary]), " ".join(tokens[boundary:])
+        else:
+            boundary = 0
+            while boundary < len(tokens) and initial_token(tokens[boundary]):
+                boundary += 1
+            if not 0 < boundary < len(tokens):
+                return "", []
+            given, surname = " ".join(tokens[:boundary]), " ".join(tokens[boundary:])
+        if not surname or not given:
+            return "", []
+    return re.sub(r"[^a-z0-9]", "", surname.lower()), re.findall(r"[A-Za-z0-9]+", given)
 
 
 def scopus_author_name_parts(name):
     """Return a conservative (surname, initials) key for Scopus name variants."""
-    text = normalize_author_display_name(name)
-    if not text:
-        return "", ""
-    if "," in text:
-        surname, given = text.split(",", 1)
-        surname_tokens = re.findall(r"[A-Za-z0-9]+", surname.lower())
-        given_tokens = re.findall(r"[A-Za-z0-9]+", given)
-    else:
-        tokens = re.findall(r"[A-Za-z0-9]+", text)
-        if len(tokens) < 2:
-            return (tokens[0].lower(), "") if tokens else ("", "")
-        # Scopus affiliation entries are normally "Surname I.".  The
-        # correspondence-address variant can instead be "I. Surname".
-        if len(tokens[0]) == 1:
-            surname_tokens = [tokens[-1].lower()]
-            given_tokens = tokens[:-1]
-        else:
-            surname_tokens = [tokens[0].lower()]
-            given_tokens = tokens[1:]
-    surname_key = "".join(surname_tokens)
+    surname_key, given_tokens = _scopus_name_tokens(name)
     initials = "".join(
         token.lower() if token.isupper() and len(token) <= 4 else token[0].lower()
         for token in given_tokens if token
@@ -311,17 +336,21 @@ def scopus_author_name_parts(name):
 
 
 def scopus_author_names_match(left, right):
-    """Match only same-record Scopus names with the same surname and initials."""
+    """Compatibility only: callers must also check uniqueness in both lists."""
     left_surname, left_initials = scopus_author_name_parts(left)
     right_surname, right_initials = scopus_author_name_parts(right)
-    return bool(
-        left_surname
-        and right_surname
-        and left_initials
-        and right_initials
-        and left_surname == right_surname
-        and left_initials == right_initials
-    )
+    if not (left_surname and left_surname == right_surname and left_initials and right_initials):
+        return False
+    _, left_tokens = _scopus_name_tokens(left)
+    _, right_tokens = _scopus_name_tokens(right)
+    def abbreviated(tokens):
+        return all(len(t) == 1 or (t.isupper() and len(t) <= 4) for t in tokens)
+    if not abbreviated(left_tokens) and not abbreviated(right_tokens):
+        return "".join(left_tokens).casefold() == "".join(right_tokens).casefold()
+    # A shortened initial is useful only when the surrounding author list
+    # proves uniqueness. Two supplied, contradictory middle initials fail.
+    return ((abbreviated(left_tokens) and right_initials.startswith(left_initials))
+            or (abbreviated(right_tokens) and left_initials.startswith(right_initials)))
 
 
 def scopus_corresponding_author_affiliations(corresponding_authors, auth_entries, aff_dict, master_aff_list):
@@ -391,17 +420,23 @@ def build_scopus_author_bundle(full_names, auth_entries, master_affiliations):
     ]
     relations = []
     conflicts = []
-    for name in full_names:
-        candidates = [
-            entry for entry in entry_rows
-            if scopus_author_names_match(name, entry["name"])
-        ]
-        if len(candidates) == 1:
+    for entry in entry_rows:
+        compatible = [i for i, name in enumerate(full_names)
+                      if scopus_author_names_match(name, entry["name"])]
+        exact_initials = [i for i in compatible
+                          if scopus_author_name_parts(full_names[i]) == scopus_author_name_parts(entry["name"])]
+        # W.A. and W. can identify two separate coauthors. Only use a shorter
+        # initial fallback when no complete-initial candidate exists.
+        entry["candidates"] = exact_initials or compatible
+    for index, name in enumerate(full_names):
+        candidates = [entry for entry in entry_rows if index in entry["candidates"]]
+        ambiguous = len(candidates) > 1 or any(len(entry["candidates"]) > 1 for entry in candidates)
+        if len(candidates) == 1 and not ambiguous:
             relations.append({"name": name, "affiliations": candidates[0]["affiliations"]})
         else:
             relations.append({"name": name, "affiliations": []})
             if auth_entries:
-                kind = "不唯一" if len(candidates) > 1 else "无法匹配"
+                kind = "不唯一" if ambiguous else "无法匹配"
                 conflicts.append(f"Scopus 作者—单位条目{kind}：{name}")
     return _make_author_bundle(
         relations,
@@ -698,6 +733,89 @@ def _author_bundle_signature(bundle):
     }
 
 
+def _institution_address_profile(affiliation):
+    """Recognize a narrow, explicit institution / subunit / US city layout.
+
+    This is comparison-only: never rewrite or transfer source addresses. An
+    unknown school-parent relationship, campus qualifier or country layout
+    stays incomparable rather than being guessed from text similarity.
+    """
+    expansions = {
+        "univ": "university", "coll": "college", "natl": "national",
+        "bur": "bureau", "econ": "economic", "res": "research",
+        "dept": "department", "sch": "school", "ctr": "center",
+        "grad": "graduate",
+    }
+    def words(value):
+        return " ".join(expansions.get(word, word) for word in re.findall(r"[a-z0-9]+", value.lower()))
+    parts = [words(part) for part in _clean_affiliation(affiliation).split(",")]
+    if len(parts) < 3 or any(not part for part in parts):
+        return None
+    country = re.fullmatch(r"(?:(?P<state>[a-z]{2}) (?:\d{5}(?: \d{4})? )?)?usa", parts[-1])
+    if country:
+        state = country.group("state") or ""
+    elif parts[-1] == "united states":
+        state = ""
+    else:
+        return None
+    institution = " ".join(word for word in parts[0].split() if word not in {"the", "of", "at"})
+    if institution == "nber":
+        institution = "national bureau economic research"
+    org_markers = {"university", "college", "institute"}
+    if not (org_markers.intersection(institution.split()) or institution == "national bureau economic research"):
+        return None
+    if {"school", "department", "center"}.intersection(institution.split()):
+        return None
+    city = parts[-2]
+    if any(char.isdigit() for char in city) or org_markers.intersection(city.split()):
+        return None
+    subunits = parts[1:-2]
+    for unit in subunits:
+        tokens = set(unit.split())
+        if (not tokens.intersection({"department", "school", "center"})
+                or tokens.intersection(org_markers | {"campus", "hospital", "nber"})):
+            return None
+    return institution, city, state, frozenset(subunits)
+
+
+def _affiliations_equivalent(left, right):
+    if _affiliation_key(left) == _affiliation_key(right):
+        return True
+    a, b = _institution_address_profile(left), _institution_address_profile(right)
+    if not a or not b or a[:2] != b[:2]:
+        return False
+    if a[2] and b[2] and a[2] != b[2]:
+        return False
+    # Institution-only versus its explicit departments is differing detail;
+    # two contradictory, explicitly named department sets remain a review.
+    return not a[3] or not b[3] or a[3] == b[3]
+
+
+def _author_bundles_equivalent(left, right):
+    if left.get("unlinked_affiliations") or right.get("unlinked_affiliations"):
+        return False
+    a, b = left.get("relations", []), right.get("relations", [])
+    if not a or len(a) != len(b):
+        return False
+    used = set()
+    for relation in a:
+        candidates = [i for i, other in enumerate(b)
+                      if scopus_author_names_match(relation["name"], other["name"])]
+        if len(candidates) != 1 or candidates[0] in used:
+            return False
+        used.add(candidates[0])
+        other = b[candidates[0]]
+        affiliations_a, affiliations_b = relation.get("affiliations", []), other.get("affiliations", [])
+        if not affiliations_a or not affiliations_b:
+            return False
+        # Require coverage in both directions. A genuinely additional
+        # institution (e.g. NBER) must never disappear behind a shared one.
+        if not (all(any(_affiliations_equivalent(x, y) for y in affiliations_b) for x in affiliations_a)
+                and all(any(_affiliations_equivalent(x, y) for x in affiliations_a) for y in affiliations_b)):
+            return False
+    return True
+
+
 def merge_author_bundles(existing_bundle, new_bundle):
     existing_signature = _author_bundle_signature(existing_bundle)
     new_signature = _author_bundle_signature(new_bundle)
@@ -709,6 +827,7 @@ def merge_author_bundles(existing_bundle, new_bundle):
         and new_signature
         and existing_bundle.get("source") != new_bundle.get("source")
         and existing_signature != new_signature
+        and not _author_bundles_equivalent(existing_bundle, new_bundle)
     ):
         conflict_messages.append(
             f"跨来源作者—单位关系不一致或单位文本无法确认等价：{existing_bundle.get('source')} vs {new_bundle.get('source')}"
