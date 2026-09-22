@@ -19,6 +19,7 @@ from scope_rules import (
     SCOPE_COLUMNS,
     apply_scope_fields,
     build_scholar_alias_registry,
+    document_type_group,
     filter_alias_registry_by_emails,
     filter_publication_name_to_email_by_emails,
     parse_claim_email_filter,
@@ -1338,6 +1339,26 @@ def merge_records(existing, new_data):
     return existing
 
 
+def merge_doi_group(records, merge_fn=None):
+    """Merge a DOI group without mixing journal and conference records.
+
+    Inspect all original records first: an untyped record must not bridge the
+    two types, nor may input order determine which side receives its fields.
+    Unchanged DOI groups retain the historical merging behavior.
+    """
+    merge_fn = merge_fn or merge_records
+    groups = [document_type_group(record) for record in records]
+    split_types = {"journal", "conference"}.issubset(groups)
+    merged = {}
+    for record, group in zip(records, groups):
+        key = group if split_types else "all"
+        if key in merged:
+            merged[key] = merge_fn(merged[key], record)
+        else:
+            merged[key] = record.copy()
+    return list(merged.values())
+
+
 # 文件读取
 def read_ei_csv_robust(file_path):
     try:
@@ -1547,15 +1568,14 @@ def run_conversion(
                 else:
                     doi = record.get("DOI")
                     if doi:
-                        if doi in merged_db:
-                            merged_db[doi] = merge_records(merged_db[doi], record)
-                        else:
-                            merged_db[doi] = record
+                        merged_db.setdefault(doi, []).append(record)
 
         except Exception as e:
             print(f"读取错误 {file_path}: {e}")
 
-    output_df = pd.DataFrame(mapped_records if single_source_mode else list(merged_db.values()))
+    output_df = pd.DataFrame(mapped_records if single_source_mode else [
+        record for records in merged_db.values() for record in merge_doi_group(records)
+    ])
 
     output_columns = get_output_columns(is_external_achievement)
     for col in output_columns:

@@ -122,7 +122,7 @@ def test_excel_output_contains_expected_sheets(tmp_path):
     assert counts["待复核_其他"] == 3
 
 
-def test_split_output_frames_excludes_conference_and_keeps_review_with_articles():
+def test_split_output_frames_prefers_journal_for_dual_type_and_keeps_pure_conferences():
     df = pd.DataFrame(
         [
             {"题名": "Article", "原始文献类型": "Article", "数据归属": "本校"},
@@ -149,6 +149,7 @@ def test_split_output_frames_excludes_conference_and_keeps_review_with_articles(
         "Article Early Access",
         "Proceedings Source Article",
         "Conference",
+        "Proceedings",
         "Review",
         "Editorial",
         "Erratum",
@@ -159,10 +160,11 @@ def test_split_output_frames_excludes_conference_and_keeps_review_with_articles(
         "Article",
         "Article Early Access",
         "Proceedings Source Article",
+        "Proceedings",
         "Review",
     ]
-    assert frames["待复核_其他"]["题名"].tolist() == ["Proceedings"]
-    assert "来源文献类型冲突" in frames["待复核_其他"].iloc[0]["文献类型审核原因"]
+    assert frames["待复核_其他"].empty
+    assert frames["期刊论文"].set_index("题名").loc["Proceedings", "原始文献类型"] == "Article; Proceedings Paper"
     assert frames["会议论文"]["题名"].tolist() == ["Conference"]
     assert "综述论文" not in frames
 

@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 import re
 from time import sleep
 from claim_mapping import build_publication_name_to_email, normalize_name
+from converter import merge_doi_group
 from scope_rules import (
     FORMAL_BOWENGE_ALIAS_PATH,
     SCOPE_COLUMNS,
@@ -1103,15 +1104,15 @@ class App(ctk.CTk):
 
                         doi = record.get("DOI")
                         if doi:
-                            if doi in merged_db:
-                                merged_db[doi] = merge_records(merged_db[doi], record)
-                            else:
-                                merged_db[doi] = record
+                            merged_db.setdefault(doi, []).append(record)
 
                 except Exception as e:
                     print(f"读取错误 {file_path}: {e}")
 
-            output_df = pd.DataFrame(list(merged_db.values()))
+            output_df = pd.DataFrame([
+                record for records in merged_db.values()
+                for record in merge_doi_group(records, merge_fn=merge_records)
+            ])
             output_columns = get_output_columns(is_external_achievement)
             
             for col in output_columns:

@@ -703,6 +703,10 @@ def _document_type_tokens(row) -> list[str]:
 
 
 def is_conference_record(row) -> bool:
+    # One source may explicitly assign both Article and Proceedings Paper.
+    # Journal classification wins without altering the source type string.
+    if has_article_or_review_type(row):
+        return False
     tokens = _document_type_tokens(row)
     conference_patterns = (
         r"\bconference(?:\s+(?:paper|proceeding|abstract))?\b",
@@ -727,14 +731,16 @@ def has_article_or_review_type(row) -> bool:
     return any(token in article_tokens or token in review_tokens for token in tokens)
 
 
-def has_document_type_conflict(row) -> bool:
-    """Identify a DOI that sources classify as both conference and article/review."""
-    return is_conference_record(row) and has_article_or_review_type(row)
-
-
 def is_article_record(row) -> bool:
     """Return whether a record belongs in the journal-article export."""
-    return not is_conference_record(row) and has_article_or_review_type(row)
+    return has_article_or_review_type(row)
+
+
+def document_type_group(row) -> str:
+    """Use the same classification for DOI partitioning and export sheets."""
+    if is_article_record(row):
+        return "journal"
+    return "conference" if is_conference_record(row) else "other"
 
 
 def is_review_record(row) -> bool:
@@ -856,25 +862,18 @@ def split_output_frames(df: pd.DataFrame) -> dict:
     for col in [CLAIM_COLUMN, DOCUMENT_TYPE_AUDIT_COLUMN, *SCOPE_COLUMNS]:
         if col not in df.columns:
             df[col] = ""
-    conference_mask = df.apply(is_conference_record, axis=1)
-    document_type_conflict_mask = df.apply(has_document_type_conflict, axis=1)
-    df.loc[document_type_conflict_mask, DOCUMENT_TYPE_AUDIT_COLUMN] = (
-        "同一 DOI 的来源文献类型冲突：同时包含会议类与 Article/Review，请人工核验。"
-    )
-    exportable_mask = ~document_type_conflict_mask
-    included_df = df.loc[exportable_mask].copy()
+    included_df = df.copy()
     email = df["本校学者邮箱"].fillna("").astype(str).str.strip()
     matched = df["本校学者匹配"].fillna("").astype(str).str.strip()
     local_df = included_df[included_df["数据归属"] == "本校"]
-    external_ready_df = df.loc[exportable_mask & (df["数据归属"] == "校外") & (email != "")]
+    external_ready_df = df.loc[(df["数据归属"] == "校外") & (email != "")]
     needs_email_df = df.loc[
-        exportable_mask
-        & (df["数据归属"] == "校外")
+        (df["数据归属"] == "校外")
         & (email == "")
         & (matched != "")
         & (matched != "待确认")
     ]
-    scope_pending_mask = exportable_mask & (df["数据归属"] == "校外") & ((email == "") | (matched == "待确认"))
+    scope_pending_mask = (df["数据归属"] == "校外") & ((email == "") | (matched == "待确认"))
     original_paper_rows = []
     other_review_rows = []
     for position, (_, row) in enumerate(df.iterrows()):
@@ -884,8 +883,6 @@ def split_output_frames(df: pd.DataFrame) -> dict:
         if "作者" in row.index and not _split_semicolon_values(row.get("作者", "")):
             other_reasons.append("缺少作者")
             other_fields.append("作者")
-        if bool(document_type_conflict_mask.iloc[position]):
-            other_reasons.append(_text(row.get(DOCUMENT_TYPE_AUDIT_COLUMN, "")))
         if bool(scope_pending_mask.iloc[position]):
             other_reasons.append(_text(row.get("学者匹配依据", "")) or "本校学者匹配或邮箱待确认")
 

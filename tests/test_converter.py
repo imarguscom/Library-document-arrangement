@@ -302,7 +302,7 @@ def test_merge_records_prefers_author_text_with_more_affiliation_markers():
     assert merged["来源库"] == "WOS; SCOPUS"
 
 
-def test_run_conversion_routes_article_conference_type_conflict_to_pending_review(tmp_path):
+def test_run_conversion_keeps_article_conference_records_separate(tmp_path):
     doi = "10.1000/article-first-conference-second"
     wos_path = tmp_path / "wos.xlsx"
     scopus_path = tmp_path / "scopus.xlsx"
@@ -336,11 +336,15 @@ def test_run_conversion_routes_article_conference_type_conflict_to_pending_revie
     )
 
     all_records = pd.read_excel(output_path, sheet_name="全部数据", dtype=str)
-    assert all_records.empty
-    pending_records = pd.read_excel(output_path, sheet_name="待复核_其他", dtype=str).fillna("")
-    assert pending_records["DOI"].tolist() == [doi]
-    assert pending_records["原始文献类型"].tolist() == ["Article; Conference Paper"]
-    assert "来源文献类型冲突" in pending_records.loc[0, "文献类型审核原因"]
+    assert all_records["DOI"].tolist() == [doi, doi]
+    assert all_records["原始文献类型"].tolist() == ["Article", "Conference Paper"]
+    assert all_records["来源库"].tolist() == ["WOS", "SCOPUS"]
+    for sheet, expected_type in [("期刊论文", "Article"), ("会议论文", "Conference Paper")]:
+        records = pd.read_excel(output_path, sheet_name=sheet, dtype=str).fillna("")
+        assert records["原始文献类型"].tolist() == [expected_type]
+    for sheet in ["待复核_其他", "待复核_可尝试原文补全"]:
+        pending_records = pd.read_excel(output_path, sheet_name=sheet, dtype=str).fillna("")
+        assert not pending_records["复核原因"].str.contains("文献类型冲突").any()
 
 
 def test_run_conversion_supports_each_source_as_the_only_input(tmp_path):
