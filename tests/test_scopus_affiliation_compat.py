@@ -100,7 +100,7 @@ def test_bundle_comparison_retains_all_explicit_institutions_from_covering_sourc
         assert merged['relations'] == wos_extra['relations']
         assert nber in merged['affiliations']
     wos_unlinked = dict(wos, unlinked_affiliations=[nber])
-    assert c.merge_author_bundles(wos_unlinked, scopus)['conflicts']
+    assert nber in c.merge_author_bundles(wos_unlinked, scopus)['unlinked_affiliations']
 
 
 def test_equivalence_does_not_collapse_two_different_full_given_names():
@@ -121,6 +121,8 @@ def test_original_pair_roundtrip_and_input_order(tmp_path, monkeypatch):
     monkeypatch.setattr(s, 'discover_article_library', lambda *a, **k: None)
     raw = pd.read_excel(paths[1], dtype=str).fillna('')
     assert len(raw) == 44
+    source_records = [c.process_wos_row(row) for _, row in pd.read_excel(paths[0], dtype=str).fillna('').iterrows()]
+    source_records += [c.process_scopus_row(row) for _, row in raw.iterrows()]
     for _, row in raw.iterrows():
         record = c.process_scopus_row(row)
         assert not record[c.AUTHOR_RELATION_CONFLICT_COLUMN]
@@ -138,13 +140,28 @@ def test_original_pair_roundtrip_and_input_order(tmp_path, monkeypatch):
         sheets = pd.read_excel(dest, sheet_name=None, dtype=str)
         sheets = {k: v.fillna('') for k, v in sheets.items()}
         assert {k: len(sheets[k]) for k in ['全部数据', '期刊论文', '会议论文', '待复核_可尝试原文补全', '待复核_其他']} == {
-            '全部数据': 45, '期刊论文': 42, '会议论文': 3, '待复核_可尝试原文补全': 25, '待复核_其他': 0}
+            '全部数据': 45, '期刊论文': 42, '会议论文': 3, '待复核_可尝试原文补全': 14, '待复核_其他': 0}
         out = sheets['全部数据']
         assert out['DOI'].nunique() == 42 and out['DOI'].ne('').all()
         assert out['URL'].str.match(r'^https?://[^\s]+$').all()
         assert out['摘要'].ne('').sum() == 41
         assert out['关键词'].ne('').sum() == 40
         assert out['页数'].ne('').sum() == 41
+        for _, output_row in out.iterrows():
+            if output_row[c.AUTHOR_RELATION_CONFLICT_COLUMN]:
+                continue  # Explicitly unresolved identity is not an asserted merge.
+            restored = c._author_bundle_from_record(output_row)
+            inputs_for_doi = [r for r in source_records if r['DOI'] == output_row['DOI']]
+            if len(out[out['DOI'] == output_row['DOI']]) > 1:
+                inputs_for_doi = [r for r in inputs_for_doi if s.document_type_group(r) == s.document_type_group(output_row)]
+            for source_record in inputs_for_doi:
+                for original in source_record[c.AUTHOR_RELATIONS_KEY]['relations']:
+                    matches = [r for r in restored['relations'] if c.scopus_author_names_match(original['name'], r['name'])]
+                    assert len(matches) == 1, (output_row['DOI'], original['name'])
+                    for unit in original['affiliations']:
+                        assert any(c._union_affiliation_match(unit, final)
+                                   and c._affiliation_detail_score(final) >= c._affiliation_detail_score(unit)
+                                   for final in matches[0]['affiliations']), (output_row['DOI'], original['name'], unit)
         for doi, group in out.groupby('DOI'):
             if len(group) == 2:
                 conference = group[group['原始文献类型'] == 'Conference Paper'].iloc[0]
@@ -158,7 +175,7 @@ def test_original_pair_roundtrip_and_input_order(tmp_path, monkeypatch):
         for doi in ['10.1016/j.jfineco.2011.10.005', '10.1111/j.1540-6261.2009.01448.x']:
             yale = out.loc[out['DOI'] == doi].iloc[0]
             assert yale[c.AUTHOR_RELATION_CONFLICT_COLUMN] == ''
-            assert yale[c.AUTHOR_RELATION_SOURCE_COLUMN] == 'WOS'
+            assert 'WOS' in yale[c.AUTHOR_RELATION_SOURCE_COLUMN]
             assert 'Yale Univ, Sch Management' in yale['作者单位']
         outputs.append(Counter((row['DOI'], tuple(sorted(c.split_semicolon_values(row['原始文献类型']))))
                                for _, row in out.iterrows()))
@@ -190,8 +207,9 @@ def test_duplicate_coarse_addresses_do_not_outweigh_explicit_hierarchy():
     for left, right in [(wos, scopus), (scopus, wos)]:
         merged = c.merge_author_bundles(left, right)
         assert not merged['conflicts']
-        assert merged['source'] == 'WOS'
+        assert 'WOS' in merged['source']
         assert merged['affiliations'] == [detailed]
+        assert set(merged['unlinked_affiliations']) == set(scopus['affiliations'][2:])
 
 
 @pytest.mark.parametrize('short', [
@@ -221,24 +239,31 @@ def test_complete_source_resolves_missing_links_without_using_position():
         assert not merged['conflicts']
         assert merged['relations'] == scopus['relations']
         assert c._render_author_bundle(merged)['作者'] == 'Bravo, Bob(1); Alpha, Alice(2)'
-    # Already supplied contradictory links must not be mistaken for blanks.
+    # Each explicitly supplied link survives the union for the same author.
     conflicting = dict(wos, relations=[
         {'name': 'Alpha, Alice', 'affiliations': ['Institute C']},
         {'name': 'Bravo, Bob', 'affiliations': []}])
-    assert c.merge_author_bundles(conflicting, scopus)['conflicts']
+    merged = c.merge_author_bundles(conflicting, scopus)
+    alpha = next(r for r in merged['relations'] if r['name'] == 'Alpha, Alice')
+    assert set(alpha['affiliations']) == {'Institute A', 'Institute C'}
     # An unmatched unlinked unit must not silently disappear either.
     unmatched = dict(wos, unlinked_affiliations=['Institute C'])
-    assert c.merge_author_bundles(unmatched, scopus)['conflicts']
+    merged = c.merge_author_bundles(unmatched, scopus)
+    assert 'Institute C' in merged['unlinked_affiliations']
+    assert '作者—单位关联不完整' in s._author_metadata_review_issues(pd.Series(c._render_author_bundle(merged)))[0]
 
 
-def test_two_partial_sources_are_not_mislabeled_as_one_complete_source():
+def test_two_partial_sources_combine_only_their_explicit_author_links():
     left = c._make_author_bundle([
         {'name': 'Alpha, Alice', 'affiliations': ['Institute A']},
         {'name': 'Bravo, Bob', 'affiliations': []}], ['Institute A'], 'WOS')
     right = c._make_author_bundle([
         {'name': 'Alpha, Alice', 'affiliations': []},
         {'name': 'Bravo, Bob', 'affiliations': ['Institute B']}], ['Institute B'], 'SCOPUS')
-    assert c.merge_author_bundles(left, right)['conflicts']
+    merged = c.merge_author_bundles(left, right)
+    assert not merged['conflicts']
+    assert {r['name']: r['affiliations'] for r in merged['relations']} == {
+        'Alpha, Alice': ['Institute A'], 'Bravo, Bob': ['Institute B']}
 
 
 def test_equal_initials_do_not_hide_different_full_author_names():
@@ -255,7 +280,9 @@ def test_equal_explicit_links_do_not_hide_unmatched_unlinked_units():
     right = _bundle(['Institute A'], 'SCOPUS')
     left['unlinked_affiliations'] = ['Institute B']
     for a, b in [(left, right), (right, left)]:
-        assert c.merge_author_bundles(a, b)['conflicts']
+        merged = c.merge_author_bundles(a, b)
+        assert merged['unlinked_affiliations'] == ['Institute B']
+        assert '作者—单位关联不完整' in s._author_metadata_review_issues(pd.Series(c._render_author_bundle(merged)))[0]
 
 
 def test_different_bare_unit_lists_without_any_authors_remain_in_review():
@@ -265,17 +292,18 @@ def test_different_bare_unit_lists_without_any_authors_remain_in_review():
         assert c.merge_author_bundles(a, b)['conflicts']
 
 
-def test_covering_source_wins_even_when_other_source_has_more_hierarchy_detail():
+def test_union_preserves_hierarchy_detail_and_additional_institutions_together():
     left = _bundle(['Princeton Univ, Dept Econ, Princeton, NJ 08540 USA'], 'WOS')
     right = _bundle(['Princeton University, Princeton, United States',
                      'NBER, Cambridge, MA 02138 USA'], 'SCOPUS')
     for a, b in [(left, right), (right, left)]:
         merged = c.merge_author_bundles(a, b)
         assert not merged['conflicts']
-        assert merged['relations'] == right['relations']
+        assert set(merged['relations'][0]['affiliations']) == {
+            left['affiliations'][0], 'NBER, Cambridge, MA 02138 USA'}
 
 
-def test_reversed_extra_institutions_for_different_authors_are_not_one_covering_source():
+def test_union_never_transfers_an_extra_institution_to_another_author():
     left = c._make_author_bundle([
         {'name': 'Alpha, Alice', 'affiliations': ['Institute A', 'Institute B']},
         {'name': 'Bravo, Bob', 'affiliations': ['Institute C']}], [], 'WOS')
@@ -283,7 +311,11 @@ def test_reversed_extra_institutions_for_different_authors_are_not_one_covering_
         {'name': 'Alpha, Alice', 'affiliations': ['Institute A']},
         {'name': 'Bravo, Bob', 'affiliations': ['Institute C', 'Institute D']}], [], 'SCOPUS')
     for a, b in [(left, right), (right, left)]:
-        assert c.merge_author_bundles(a, b)['conflicts']
+        merged = c.merge_author_bundles(a, b)
+        assert not merged['conflicts']
+        assert {r['name']: set(r['affiliations']) for r in merged['relations']} == {
+            'Alpha, Alice': {'Institute A', 'Institute B'},
+            'Bravo, Bob': {'Institute C', 'Institute D'}}
 
 
 @pytest.mark.parametrize('left,right,expected', [

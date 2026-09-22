@@ -616,7 +616,7 @@ def test_merge_records_rerenders_author_numbers_from_one_selected_relationship_b
     # list are regenerated together, so Alpha's (2) still means Institute A.
     assert merged["作者"] == "Alpha, Alice(2); Bravo, Bob(1)"
     assert merged["作者单位"] == "(1) Institute B; (2) Institute A"
-    assert merged["作者—单位关联来源"] == "SCOPUS"
+    assert merged["作者—单位关联来源"] == "SCOPUS; WOS"
     assert merged["作者—单位关联冲突原因"] == ""
     # WOS remains the complete correspondence pair; it is not combined with a
     # name-only Scopus field.
@@ -626,11 +626,11 @@ def test_merge_records_rerenders_author_numbers_from_one_selected_relationship_b
     assert merged["通讯作者单位来源"] == "WOS: Reprint Addresses"
 
 
-def test_cross_source_author_and_correspondence_conflicts_are_auditable_and_reviewable():
+def test_author_unit_union_does_not_change_correspondence_conflict_review():
     doi = "10.1000/paired-author-affiliation-conflict"
     wos_record = _paired_wos_record(doi)
-    # Each filled Scopus pair contradicts WOS. The output must choose one
-    # complete source bundle, retain its sources, and surface the disagreement.
+    # Both explicitly declared units are now retained per author. A different
+    # declared corresponding author remains a separate review issue.
     scopus_record = _paired_scopus_record(
         doi,
         alpha_affiliation="Institute B",
@@ -642,13 +642,13 @@ def test_cross_source_author_and_correspondence_conflicts_are_auditable_and_revi
     review_frames = split_output_frames(pd.DataFrame([merged]))
     review = review_frames["待复核_可尝试原文补全"].fillna("")
 
-    assert merged["作者"] == "Alpha, Alice(1); Bravo, Bob(2)"
+    assert merged["作者"] == "Alpha, Alice(1,2); Bravo, Bob(1,2)"
     assert merged["作者单位"] == "(1) Institute B; (2) Institute A"
-    assert "跨来源作者—单位关系不一致" in merged["作者—单位关联冲突原因"]
+    assert merged["作者—单位关联冲突原因"] == ""
     assert merged["通讯作者"] == "Bravo, Bob"
     assert merged["通讯作者单位"] == "Institute A"
     assert merged["通讯作者来源"] == "SCOPUS: Corresponding Author"
     assert merged["通讯作者单位来源"] == "SCOPUS: Authors with affiliations"
     assert "跨来源通讯作者—单位关系不一致" in merged["通讯作者—单位关联冲突原因"]
-    assert "作者—单位关联存在冲突" in review.loc[0, "复核原因"]
+    assert "作者—单位关联存在冲突" not in review.loc[0, "复核原因"].split("；")
     assert "通讯作者—单位关联存在冲突" in review.loc[0, "复核原因"]
