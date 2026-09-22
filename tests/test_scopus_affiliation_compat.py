@@ -83,7 +83,7 @@ def _bundle(affiliations, source):
     return c._make_author_bundle([{'name': 'Xiong, Wei', 'affiliations': affiliations}], affiliations, source)
 
 
-def test_bundle_comparison_allows_department_detail_but_not_an_added_institution():
+def test_bundle_comparison_retains_all_explicit_institutions_from_covering_source():
     wos = _bundle([
         'Princeton Univ, Dept Econ, Princeton, NJ 08540 USA',
         'Princeton Univ, Bendheim Ctr Finance, Princeton, NJ 08540 USA'], 'WOS')
@@ -94,8 +94,11 @@ def test_bundle_comparison_allows_department_detail_but_not_an_added_institution
         assert merged['relations'] == wos['relations']  # Preserve detailed atomic bundle.
     nber = 'NBER, Cambridge, MA 02138 USA'
     wos_extra = _bundle([*wos['affiliations'], nber], 'WOS')
-    assert c.merge_author_bundles(wos_extra, scopus)['conflicts']
-    assert c.merge_author_bundles(scopus, wos_extra)['conflicts']
+    for left, right in [(wos_extra, scopus), (scopus, wos_extra)]:
+        merged = c.merge_author_bundles(left, right)
+        assert not merged['conflicts']
+        assert merged['relations'] == wos_extra['relations']
+        assert nber in merged['affiliations']
     wos_unlinked = dict(wos, unlinked_affiliations=[nber])
     assert c.merge_author_bundles(wos_unlinked, scopus)['conflicts']
 
@@ -135,7 +138,7 @@ def test_original_pair_roundtrip_and_input_order(tmp_path, monkeypatch):
         sheets = pd.read_excel(dest, sheet_name=None, dtype=str)
         sheets = {k: v.fillna('') for k, v in sheets.items()}
         assert {k: len(sheets[k]) for k in ['全部数据', '期刊论文', '会议论文', '待复核_可尝试原文补全', '待复核_其他']} == {
-            '全部数据': 45, '期刊论文': 42, '会议论文': 3, '待复核_可尝试原文补全': 34, '待复核_其他': 0}
+            '全部数据': 45, '期刊论文': 42, '会议论文': 3, '待复核_可尝试原文补全': 25, '待复核_其他': 0}
         out = sheets['全部数据']
         assert out['DOI'].nunique() == 42 and out['DOI'].ne('').all()
         assert out['URL'].str.match(r'^https?://[^\s]+$').all()
@@ -148,7 +151,9 @@ def test_original_pair_roundtrip_and_input_order(tmp_path, monkeypatch):
                 journal = group[group['原始文献类型'] == 'Article'].iloc[0]
                 assert conference['WOS记录号'] == '' and conference['SCOPUSEID']
                 assert journal['WOS记录号'] and journal['SCOPUSEID'] == ''
-        assert out.loc[out['DOI'] == '10.1111/jofi.12261', c.AUTHOR_RELATION_CONFLICT_COLUMN].ne('').all()
+        nber_row = out.loc[out['DOI'] == '10.1111/jofi.12261'].iloc[0]
+        assert not nber_row[c.AUTHOR_RELATION_CONFLICT_COLUMN]
+        assert 'NBER' in nber_row['作者单位']
         assert out.loc[out['DOI'] == '10.1257/aer.101.6.2723', c.AUTHOR_RELATION_CONFLICT_COLUMN].eq('').all()
         for doi in ['10.1016/j.jfineco.2011.10.005', '10.1111/j.1540-6261.2009.01448.x']:
             yale = out.loc[out['DOI'] == doi].iloc[0]
@@ -234,3 +239,110 @@ def test_two_partial_sources_are_not_mislabeled_as_one_complete_source():
         {'name': 'Alpha, Alice', 'affiliations': []},
         {'name': 'Bravo, Bob', 'affiliations': ['Institute B']}], ['Institute B'], 'SCOPUS')
     assert c.merge_author_bundles(left, right)['conflicts']
+
+
+def test_equal_initials_do_not_hide_different_full_author_names():
+    left = _bundle(['Institute A'], 'WOS')
+    right = _bundle(['Institute A'], 'SCOPUS')
+    left['relations'][0]['name'] = 'Li, Mei'
+    right['relations'][0]['name'] = 'Li, Ming'
+    for a, b in [(left, right), (right, left)]:
+        assert c.merge_author_bundles(a, b)['conflicts']
+
+
+def test_equal_explicit_links_do_not_hide_unmatched_unlinked_units():
+    left = _bundle(['Institute A'], 'WOS')
+    right = _bundle(['Institute A'], 'SCOPUS')
+    left['unlinked_affiliations'] = ['Institute B']
+    for a, b in [(left, right), (right, left)]:
+        assert c.merge_author_bundles(a, b)['conflicts']
+
+
+def test_different_bare_unit_lists_without_any_authors_remain_in_review():
+    left = c._make_author_bundle([], [], 'WOS', unlinked_affiliations=['Institute A'])
+    right = c._make_author_bundle([], [], 'SCOPUS', unlinked_affiliations=['Institute B'])
+    for a, b in [(left, right), (right, left)]:
+        assert c.merge_author_bundles(a, b)['conflicts']
+
+
+def test_covering_source_wins_even_when_other_source_has_more_hierarchy_detail():
+    left = _bundle(['Princeton Univ, Dept Econ, Princeton, NJ 08540 USA'], 'WOS')
+    right = _bundle(['Princeton University, Princeton, United States',
+                     'NBER, Cambridge, MA 02138 USA'], 'SCOPUS')
+    for a, b in [(left, right), (right, left)]:
+        merged = c.merge_author_bundles(a, b)
+        assert not merged['conflicts']
+        assert merged['relations'] == right['relations']
+
+
+def test_reversed_extra_institutions_for_different_authors_are_not_one_covering_source():
+    left = c._make_author_bundle([
+        {'name': 'Alpha, Alice', 'affiliations': ['Institute A', 'Institute B']},
+        {'name': 'Bravo, Bob', 'affiliations': ['Institute C']}], [], 'WOS')
+    right = c._make_author_bundle([
+        {'name': 'Alpha, Alice', 'affiliations': ['Institute A']},
+        {'name': 'Bravo, Bob', 'affiliations': ['Institute C', 'Institute D']}], [], 'SCOPUS')
+    for a, b in [(left, right), (right, left)]:
+        assert c.merge_author_bundles(a, b)['conflicts']
+
+
+@pytest.mark.parametrize('left,right,expected', [
+    ('Renmin Univ China, Beijing, Peoples R China',
+     'Renmin University of China, Beijing, China', True),
+    ('Chinese Univ Hong Kong, Hong Kong, Peoples R China',
+     'Chinese University of Hong Kong, Hong Kong, Hong Kong', True),
+    ('Chinese Univ Hong Kong, Shenzhen, Peoples R China',
+     'The Chinese University of Hong Kong, Shenzhen, Shenzhen, China', True),
+    ('Chinese Univ Hong Kong, Shenzhen, Peoples R China',
+     'Chinese University of Hong Kong, Hong Kong, Hong Kong', False),
+    ('Princeton Univ, Princeton, NJ 08540 USA',
+     'Princeton University, Princeton, China', False),
+    ('Cent Univ Finance & Econ, Beijing, Peoples R China',
+     'Central University of Finance and Economics, Beijing, China', True),
+    ('Univ Chicago, Booth Sch Business, Chicago, IL 60637 USA',
+     'The University of Chicago Booth School of Business, Chicago, United States', True),
+])
+def test_international_address_spelling_and_campus_boundaries(left, right, expected):
+    assert c._affiliations_equivalent(left, right) is expected
+    assert c._affiliations_equivalent(right, left) is expected
+
+
+def test_diacritics_do_not_drop_letters_or_match_a_different_given_name():
+    assert c.scopus_author_names_match('Scheinkman, Jose', 'Scheinkman, José')
+    assert not c.scopus_author_names_match('Scheinkman, Jos', 'Scheinkman, José')
+    assert not c.scopus_author_names_match('Li, Mei', 'Li, Ming')
+
+
+def test_liu_input_pair_and_single_source_missing_evidence(tmp_path, monkeypatch):
+    folder = os.environ.get('SCOPUS_PAIR_REGRESSION_DIR')
+    if not folder:
+        pytest.skip('Set SCOPUS_PAIR_REGRESSION_DIR to audit the private Liu inputs')
+    paths = [str(Path(folder) / name) for name in ['wos_frontend_6_刘隽懿.xlsx', 'scopus_frontend_6_刘隽懿.xlsx']]
+    monkeypatch.setattr(s, 'DEFAULT_ALIAS_PATHS', [])
+    monkeypatch.setattr(s, 'discover_account_file', lambda *a, **k: None)
+    monkeypatch.setattr(s, 'discover_article_library', lambda *a, **k: None)
+    raws = [pd.read_excel(path, dtype=str).fillna('') for path in paths]
+    assert [len(raw) for raw in raws] == [5, 16]
+    assert raws[0]['Reprint Addresses'].eq('').all()
+    assert raws[1]['Correspondence Address'].eq('').all()
+    dois = set(raws[1]['DOI'].map(c.normalize_doi))
+    overlap = set(raws[0]['DOI'].map(c.normalize_doi))
+    assert len(dois) == 16 and len(overlap) == 5 and overlap <= dois
+    missing_units = {'10.1109/imfw59690.2024.10477107', '10.1109/imfw59690.2024.10477124'}
+    for index, inputs in enumerate([paths, paths[::-1], [paths[0]], [paths[1]]]):
+        dest = str(tmp_path / f'liu_{index}.xlsx')
+        c.run_conversion(inputs, dest, 'local')
+        sheets = {k: v.fillna('') for k, v in pd.read_excel(dest, sheet_name=None, dtype=str).items()}
+        out = sheets['全部数据']
+        review = sheets['待复核_可尝试原文补全']
+        assert len(out) == (5 if index == 2 else 16)
+        assert len(sheets['期刊论文']) == 5
+        assert len(sheets['会议论文']) == (0 if index == 2 else 11)
+        assert set(out['DOI']) == (overlap if index == 2 else dois)
+        assert out['通讯作者'].eq('').all() and len(review) == len(out)
+        assert out[c.AUTHOR_RELATION_CONFLICT_COLUMN].eq('').all()
+        assert review['复核原因'].str.contains('缺少通讯作者').all()
+        if index != 2:
+            assert set(out.loc[out['作者单位'].eq(''), 'DOI']) == missing_units
+            assert out.loc[out['DOI'].isin(overlap), c.AUTHOR_RELATION_SOURCE_COLUMN].eq('SCOPUS').all()
+            assert out.loc[~out['DOI'].isin(missing_units), '作者'].str.contains(r'\(\d').all()

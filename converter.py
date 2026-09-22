@@ -1,6 +1,7 @@
 import pandas as pd
 import sys
 import re
+import unicodedata
 import urllib.parse
 import xml.etree.ElementTree as ET
 from time import sleep
@@ -300,6 +301,9 @@ def scopus_author_entry_name(entry):
 
 def _scopus_name_tokens(name):
     text = normalize_author_display_name(name)
+    # Comparing Jose/José must not truncate the accented given name to Jos.
+    text = ''.join(char for char in unicodedata.normalize('NFKD', text)
+                   if not unicodedata.combining(char))
     if "," in text:
         surname, given = text.split(",", 1)
     else:
@@ -726,17 +730,20 @@ def _author_bundle_score(bundle):
 
 
 def _author_bundle_signature(bundle):
-    return {
-        _author_identity_key(relation["name"]): tuple(sorted(_affiliation_key(affiliation) for affiliation in relation.get("affiliations", []) if _affiliation_key(affiliation)))
+    # A initials-key dictionary silently collapses distinct full names (Mei /
+    # Ming) and duplicate authors. Compatibility is resolved separately.
+    return tuple(sorted(
+        (normalize_author_display_name(relation["name"]).casefold(),
+         tuple(sorted(_affiliation_key(affiliation) for affiliation in relation.get("affiliations", []) if _affiliation_key(affiliation))))
         for relation in bundle.get("relations", [])
-        if _author_identity_key(relation["name"]) and relation.get("affiliations")
-    }
+        if relation.get("name")
+    ))
 
 
 def _institution_address_profile(affiliation):
-    """Recognize a narrow, explicit institution / subunit / US city layout.
+    """Recognize explicit institution / subunit / city address layouts.
 
-    This is comparison-only: never rewrite or transfer source addresses. An
+    This is comparison-only: never rewrite or transfer source addresses. A
     school-only first segment is retained for explicit paired-hierarchy
     comparison. Unknown parents, campuses and country layouts are not guessed.
     """
@@ -744,7 +751,7 @@ def _institution_address_profile(affiliation):
         "univ": "university", "coll": "college", "natl": "national",
         "bur": "bureau", "econ": "economic", "res": "research",
         "dept": "department", "sch": "school", "ctr": "center",
-        "grad": "graduate",
+        "grad": "graduate", "cent": "central", "economics": "economic",
     }
     def words(value):
         return " ".join(expansions.get(word, word) for word in re.findall(r"[a-z0-9]+", value.lower()))
@@ -754,29 +761,40 @@ def _institution_address_profile(affiliation):
     country = re.fullmatch(r"(?:(?P<state>[a-z]{2}) (?:\d{5}(?: \d{4})? )?)?usa", parts[-1])
     if country:
         state = country.group("state") or ""
+        country_key = "us"
     elif parts[-1] == "united states":
         state = ""
+        country_key = "us"
+    elif parts[-1] in {"china", "peoples r china", "people s r china", "hong kong"}:
+        state = ""
+        country_key = "china"
+        # A Hong Kong location must not be confused with the Shenzhen campus.
+        if parts[-1] == "hong kong" and parts[-2] != "hong kong":
+            return None
     else:
         return None
-    institution = " ".join(word for word in parts[0].split() if word not in {"the", "of", "at"})
+    institution = " ".join(word for word in parts[0].split() if word not in {"the", "of", "at", "and"})
     if institution == "nber":
         institution = "national bureau economic research"
     org_markers = {"university", "college", "institute"}
     school_only = "school" in institution.split() and not org_markers.intersection(institution.split())
-    if not (org_markers.intersection(institution.split()) or institution == "national bureau economic research" or school_only):
+    if not (org_markers.intersection(institution.split()) or institution == "national bureau economic research"
+            or "stock exchange" in institution or school_only):
         return None
-    if not school_only and {"school", "department", "center"}.intersection(institution.split()):
+    if {"department", "center"}.intersection(institution.split()):
         return None
     city = parts[-2]
+    if country_key == "china":
+        city = re.sub(r" \d{6}$", "", city)
     if any(char.isdigit() for char in city) or org_markers.intersection(city.split()):
         return None
-    subunits = parts[1:-2]
+    subunits = [part for part in parts[1:-2] if part != city]
     for unit in subunits:
         tokens = set(unit.split())
         if (not tokens.intersection({"department", "school", "center"})
                 or tokens.intersection(org_markers | {"campus", "hospital", "nber"})):
             return None
-    return institution, city, state, frozenset(subunits)
+    return institution, city, state, frozenset(subunits), country_key
 
 
 def _explicit_school_shorthand(long_profile, short_profile):
@@ -785,23 +803,23 @@ def _explicit_school_shorthand(long_profile, short_profile):
     Yale University + School of Management -> Yale School of Management.
     No school-parent dictionary or fuzzy prefix matching is involved.
     """
-    parent, _, _, units = long_profile
-    short_name, _, _, short_units = short_profile
+    parent, _, _, units, _ = long_profile
+    short_name, _, _, short_units, _ = short_profile
     if short_units or "university" not in parent.split() or len(units) != 1:
         return False
     unit = next(iter(units))
     if "school" not in unit.split():
         return False
     stem = " ".join(word for word in parent.split() if word != "university")
-    unit = " ".join(word for word in unit.split() if word not in {"the", "of", "at"})
-    return bool(stem) and f"{stem} {unit}" == short_name
+    unit = " ".join(word for word in unit.split() if word not in {"the", "of", "at", "and"})
+    return bool(stem) and short_name in {f"{stem} {unit}", f"{parent} {unit}"}
 
 
 def _affiliations_equivalent(left, right):
     if _affiliation_key(left) == _affiliation_key(right):
         return True
     a, b = _institution_address_profile(left), _institution_address_profile(right)
-    if not a or not b or a[1] != b[1]:
+    if not a or not b or a[1] != b[1] or a[4] != b[4]:
         return False
     if a[2] and b[2] and a[2] != b[2]:
         return False
@@ -812,17 +830,19 @@ def _affiliations_equivalent(left, right):
     return not a[3] or not b[3] or a[3] == b[3]
 
 
-def _author_bundles_equivalent(left, right):
-    a, b = left.get("relations", []), right.get("relations", [])
+def _author_bundle_covers(complete, partial):
+    """One source must cover every explicit link in the other source.
+
+    Missing institutions are allowed; contradictory or unmatched links are
+    not. Never combine complementary partial bundles to manufacture coverage.
+    """
+    a, b = complete.get("relations", []), partial.get("relations", [])
     if not a or len(a) != len(b):
         return False
-    complete_a = all(relation.get("affiliations") for relation in a)
-    complete_b = all(relation.get("affiliations") for relation in b)
-    if not complete_a and not complete_b:
-        # Selecting one partial bundle would still discard the other's links.
+    if not all(relation.get("affiliations") for relation in a):
         return False
-    for source, other in [(left, right), (right, left)]:
-        known = [unit for relation in other.get("relations", []) for unit in relation.get("affiliations", [])]
+    known = [unit for relation in a for unit in relation.get("affiliations", [])]
+    for source in [complete, partial]:
         if not all(any(_affiliations_equivalent(unit, candidate) for candidate in known)
                    for unit in source.get("unlinked_affiliations", [])):
             return False
@@ -835,30 +855,35 @@ def _author_bundles_equivalent(left, right):
         used.add(candidates[0])
         other = b[candidates[0]]
         affiliations_a, affiliations_b = relation.get("affiliations", []), other.get("affiliations", [])
-        if not affiliations_a or not affiliations_b:
-            # Missing evidence does not contradict the complete source. Do
-            # not infer a link from the order of an untagged address list.
-            continue
-        # Require coverage in both directions. A genuinely additional
-        # institution (e.g. NBER) must never disappear behind a shared one.
-        if not (all(any(_affiliations_equivalent(x, y) for y in affiliations_b) for x in affiliations_a)
-                and all(any(_affiliations_equivalent(x, y) for x in affiliations_a) for y in affiliations_b)):
+        # Check every partial-source link against the SAME author's links in
+        # the complete source. Its extra institutions must survive selection.
+        if not all(any(_affiliations_equivalent(x, y) for x in affiliations_a) for y in affiliations_b):
             return False
     return True
+
+
+def _author_bundles_equivalent(left, right):
+    return _author_bundle_covers(left, right) and _author_bundle_covers(right, left)
 
 
 def merge_author_bundles(existing_bundle, new_bundle):
     existing_signature = _author_bundle_signature(existing_bundle)
     new_signature = _author_bundle_signature(new_bundle)
-    compatible = _author_bundles_equivalent(existing_bundle, new_bundle)
+    existing_covers_new = _author_bundle_covers(existing_bundle, new_bundle)
+    new_covers_existing = _author_bundle_covers(new_bundle, existing_bundle)
+    compatible = existing_covers_new or new_covers_existing
+    unlinked_difference = {
+        _affiliation_key(unit) for unit in existing_bundle.get("unlinked_affiliations", [])
+    } != {
+        _affiliation_key(unit) for unit in new_bundle.get("unlinked_affiliations", [])
+    }
     conflict_messages = _unique_values([
         *existing_bundle.get("conflicts", []), *new_bundle.get("conflicts", []),
     ])
     if (
-        existing_signature
-        and new_signature
+        (existing_signature or new_signature or unlinked_difference)
         and existing_bundle.get("source") != new_bundle.get("source")
-        and existing_signature != new_signature
+        and (existing_signature != new_signature or unlinked_difference)
         and not compatible
     ):
         conflict_messages.append(
@@ -878,7 +903,12 @@ def merge_author_bundles(existing_bundle, new_bundle):
                     hierarchy_details.update((profile[0], profile[1], subunit) for subunit in profile[3])
         # Duplicate coarse spellings must not outweigh an explicit hierarchy.
         return (*score[:2], len(hierarchy_details), *score[2:])
-    selected = new_bundle if selection_score(new_bundle) > selection_score(existing_bundle) else existing_bundle
+    if existing_covers_new and not new_covers_existing:
+        selected = existing_bundle
+    elif new_covers_existing and not existing_covers_new:
+        selected = new_bundle
+    else:
+        selected = new_bundle if selection_score(new_bundle) > selection_score(existing_bundle) else existing_bundle
     selected = dict(selected)
     selected["conflicts"] = _unique_values(conflict_messages)
     return selected
