@@ -169,7 +169,9 @@ src/博文阁用户别名表.xlsx
 
 - EI 读取 `Corresponding author(s)`，剥离姓名后附带的邮箱，并根据同条记录中明确的作者编号关联通讯作者单位。支持 `(1, 2)` 等带空格编号和非连续编号；单位内部的分号按地址内容处理。
 - WOS 的 `Reprint Addresses`、Scopus 的 `Correspondence Address` 明确指向某位作者时，可以补全这位作者缺失的单位关联。姓名必须能唯一匹配；不会把一个单位分配给所有作者，也不会以第一作者或末位作者推断通讯作者。
-- 多个通讯作者中任一人的单位不能确定时，通讯作者单位仍保留待核验状态。多个 WOS 通讯地址组目前不用于自动反向补全。
+- 多个通讯作者中任一人的姓名或单位不能确定时仍保留待核验状态。WOS 按每个 `(corresponding author)` / `(reprint author)` 标记解析人名与地址组，分别保留对应关系；不把后一组姓名当作前一组单位。
+- WOS 优先利用同条记录的 `Authors` 与 `Author Full Names` 对照识别拼音缩写。两列长度及逐位姓氏/首字母必须一致，重复缩写或不一致的对照不会强行匹配。
+- WOS 保留 `Abstract`、`Number of Pages`、`Cited References`；关键词优先 `Author Keywords`，为空时使用 `Keywords Plus`；链接只接收 `DOI Link` / `URL` / `Web of Science Record` 中有效的 HTTP(S) 地址，否则按有效 DOI 构造 doi.org 链接。旧 XLS 的链接公式缓存值 `0` 不作为网址输出。
 - `自动补全依据` 保留所用原始字段及规则。复核表附带 `原文链接`，并在 `建议复核路径` 中列出尚待核验的作者。
 - 这些补全仅使用本次输入文件，不请求外部接口，不建立跨次运行的核验知识库；文献类型归类与合并规则见“数据处理流程”。
 

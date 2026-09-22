@@ -12,6 +12,7 @@ from metadata_completion import (
     complete_ei_record,
     complete_scopus_record,
     complete_wos_record,
+    unique_author,
 )
 
 from claim_mapping import build_publication_name_to_email, normalize_name
@@ -1028,6 +1029,97 @@ def process_scopus_row(row):
     return apply_source_completion(record, row, complete_scopus_record)
 
 
+def wos_name_resolver(short_names, full_names):
+    """Use the same WOS row's parallel AU/AF lists, never a global name guess."""
+    short_names = [normalize_author_display_name(n) for n in split_semicolon_values(short_names)]
+    paired = len(short_names) == len(full_names) and bool(short_names)
+    if paired:
+        for short, full in zip(short_names, full_names):
+            surname, initials = scopus_author_name_parts(short)
+            full_surname, full_initials = scopus_author_name_parts(full)
+            if surname != full_surname or not initials or not full_initials or initials[0] != full_initials[0]:
+                paired = False
+                break
+
+    def resolve(candidate):
+        candidate = normalize_author_display_name(candidate)
+        exact = [n for n in full_names if n.casefold() == candidate.casefold()]
+        if len(exact) == 1:
+            return exact[0], ""
+        matches = [i for i, n in enumerate(short_names) if n.casefold() == candidate.casefold()]
+        if len(matches) > 1 or len(exact) > 1:
+            return "", f"通讯作者姓名匹配不唯一：{candidate}"
+        if paired and len(matches) == 1:
+            return full_names[matches[0]], ""
+        index = unique_author(candidate, full_names)
+        if index is not None:
+            return full_names[index], ""
+        return "", f"通讯作者姓名无法唯一匹配作者列表：{candidate}"
+    return resolve
+
+
+def parse_wos_correspondence(raw, resolve):
+    """Partition marked RP groups before resolving names or collecting units."""
+    markers = list(re.finditer(r"\((?:corresponding|reprint)\s+author\)", raw, re.I))
+    if not markers:
+        return [], [], [], raw
+    starts = [0]
+    for previous, marker in zip(markers, markers[1:]):
+        between = raw[previous.end():marker.start()]
+        boundaries = [0, *[m.end() for m in re.finditer(r"[;；]", between)]]
+        if len(boundaries) < 2:
+            return [], [], ["WOS 通讯地址组之间缺少明确分隔符：" + raw], raw
+        index = len(boundaries) - 1
+        while index > 1:
+            token = between[boundaries[index - 1]:boundaries[index] - 1].strip()
+            known, _ = resolve(token)
+            if not known:
+                # An unrecognised "Surname, Given" before a shared marker may
+                # be another person, not the preceding author's institution.
+                # Preserve the raw group for review rather than invent a link.
+                if re.fullmatch(r"[^,;()\d]+,\s*[^,;()\d]+", token):
+                    return [], [], ["WOS 通讯地址姓名/单位边界不明确：" + raw], raw
+                break
+            index -= 1
+        starts.append(previous.end() + boundaries[index])
+
+    relations = {}
+    resolved_relations = {}
+    conflicts = []
+    for i, marker in enumerate(markers):
+        candidates = split_semicolon_values(raw[starts[i]:marker.start()])
+        address = raw[marker.end():starts[i + 1] if i + 1 < len(starts) else len(raw)].strip(" ,;；")
+        if not candidates or not address:
+            conflicts.append("WOS 通讯作者或通讯地址缺失：" + raw[starts[i]:marker.end()])
+        for candidate in candidates:
+            name, reason = resolve(candidate)
+            if reason:
+                conflicts.append(reason)
+            # Preserve unidentified people as explicit unresolved evidence.
+            key = name or candidate
+            units = split_semicolon_values(address)
+            relations.setdefault(key, []).extend(units)
+            if name and address:
+                resolved_relations.setdefault(name, []).extend(units)
+    pack = lambda mapping: [{"name": name, "affiliations": _unique_values(units)} for name, units in mapping.items()]
+    return pack(relations), pack(resolved_relations), conflicts, ""
+
+
+def wos_record_url(row, doi):
+    # Legacy XLS hyperlink formulas can expose a cached "0", not a URL.
+    for field in ["DOI Link", "URL", "Web of Science Record"]:
+        value = safe_get(row, [field])
+        try:
+            parsed = urllib.parse.urlsplit(value)
+            if parsed.scheme.lower() in {"http", "https"} and parsed.hostname and not re.search(r"\s", value):
+                return value
+        except ValueError:
+            pass
+    if re.fullmatch(r"10\.\d{4,9}/\S+", str(doi or ""), re.I):
+        return "https://doi.org/" + doi
+    return ""
+
+
 # WOS 处理逻
 def process_wos_row(row):
     doi = normalize_doi(safe_get(row, ["DOI", "DI"]))
@@ -1045,6 +1137,7 @@ def process_wos_row(row):
     af_list = [normalize_author_display_name(x) for x in str(authors_af).split(';')] if authors_af else []
     af_list = [author for author in af_list if author]
     first_author = af_list[0] if af_list else ""
+    resolve_wos_name = wos_name_resolver(authors_short, af_list)
 
     addresses = safe_get(row, ["Addresses", "C1", "作者单位"])
     
@@ -1069,7 +1162,7 @@ def process_wos_row(row):
                 linked_affiliations.append(affil)
                 unlinked_affiliations.extend(affil_parts[1:])
                 for au in authors_in_bracket.split(';'):
-                    resolved_name, reason = resolve_full_author_name(au, af_list)
+                    resolved_name, reason = resolve_wos_name(au)
                     if not resolved_name:
                         if reason:
                             author_conflicts.append(
@@ -1099,35 +1192,13 @@ def process_wos_row(row):
 
     # 提取通讯作者全名及单位
     rp_address = safe_get(row, ["Reprint Addresses", "RP", "通讯地址"])
-    corr_relations = []
-    corr_conflicts = []
-    raw_corr_name = ""
-    raw_corr_affiliations = ""
-    if rp_address:
-        rp_lower = rp_address.lower()
-        if "(corresponding author)" in rp_lower or "(reprint author)" in rp_lower:
-            idx = rp_address.find('(')
-            idx2 = rp_address.find(')', idx)
-            if idx != -1 and idx2 != -1:
-                corr_author_short = rp_address[:idx].strip()
-                corr_author_aff = rp_address[idx2+1:].strip().lstrip(",").strip()
-                resolved_name, reason = resolve_full_author_name(corr_author_short, af_list)
-                if resolved_name:
-                    corr_relations.append({"name": resolved_name, "affiliations": [corr_author_aff]})
-                else:
-                    raw_corr_name = corr_author_short
-                    raw_corr_affiliations = corr_author_aff
-                    if reason:
-                        corr_conflicts.append(reason)
-        else:
-            raw_corr_affiliations = rp_address
+    corr_relations, resolved_corr, corr_conflicts, raw_corr_affiliations = parse_wos_correspondence(rp_address, resolve_wos_name)
     corr_bundle = _make_correspondence_bundle(
         corr_relations,
         "WOS",
-        "WOS: Reprint Addresses" if corr_relations or raw_corr_name else "",
+        "WOS: Reprint Addresses" if corr_relations else "",
         "WOS: Reprint Addresses" if corr_relations or raw_corr_affiliations else "",
         corr_conflicts,
-        raw_name=raw_corr_name,
         raw_affiliations=raw_corr_affiliations,
     )
 
@@ -1152,7 +1223,7 @@ def process_wos_row(row):
         "影响因子": safe_get(row, ["Impact Factor", "IF", "Journal Impact Factor"]),
         "收录类别": wos_index or "SCIE",
         "来源库": "WOS",
-        "URL": "",
+        "URL": wos_record_url(row, doi),
         "语种": lang,
         "发表日期": final_date,
     }
@@ -1164,6 +1235,10 @@ def process_wos_row(row):
     record["卷号"] = safe_get(row, ["Volume", "VL"])
     record["期号"] = safe_get(row, ["Issue", "IS"])
     record["页码"] = page_value
+    record["摘要"] = safe_get(row, ["Abstract", "AB"])
+    record["关键词"] = normalize_keywords(safe_get(row, ["Author Keywords", "DE", "Keywords Plus", "ID"]))
+    record["页数"] = safe_get(row, ["Number of Pages", "Page Count", "PG"])
+    record["参考文献"] = safe_get(row, ["Cited References", "CR"])
     record["资助项目"] = safe_get(row, ["Funding Orgs", "FU"])
     record["出版者"] = safe_get(row, ["Publisher", "PU"])
     record["原始文献类型"] = safe_get(row, ["Document Type", "DT"])
@@ -1173,6 +1248,7 @@ def process_wos_row(row):
 
     apply_author_bundle(record, author_bundle)
     apply_correspondence_bundle(record, corr_bundle)
+    record["_wos_resolved_correspondence"] = resolved_corr
     return apply_source_completion(record, row, complete_wos_record)
 
 

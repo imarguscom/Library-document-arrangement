@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 import re
 from time import sleep
 from claim_mapping import build_publication_name_to_email, normalize_name
-from converter import merge_doi_group
+from converter import merge_doi_group, process_wos_row as shared_process_wos_row
 from scope_rules import (
     FORMAL_BOWENGE_ALIAS_PATH,
     SCOPE_COLUMNS,
@@ -1092,7 +1092,7 @@ class App(ctk.CTk):
                         if is_scopus:
                             record = process_scopus_row(row)
                         elif is_wos:
-                            record = process_wos_row(row)
+                            record = shared_process_wos_row(row)
                         elif is_ei:
                             record = process_ei_row(row)
                         else:

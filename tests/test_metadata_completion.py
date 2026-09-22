@@ -120,12 +120,15 @@ def test_wos_ambiguous_initials_do_not_complete_author_links():
     assert record["作者"] == "Li, Ming; Li, Mei"
 
 
-def test_multiple_wos_correspondence_groups_are_not_flattened_for_completion():
+def test_multiple_wos_correspondence_groups_complete_only_their_own_author():
     record = process_wos_row(pd.Series({
         "Authors": "Lin, XM; Zhou, Q", "Addresses": "Institute A; Institute B",
         "Reprint Addresses": "Lin, XM (corresponding author), Institute A; Zhou, Q (corresponding author), Institute B",
     }))
-    assert record["作者"] == "Lin, XM; Zhou, Q"
+    assert record["作者"] == "Lin, XM (1); Zhou, Q (2)"
+    assert record["作者单位"] == "(1) Institute A; (2) Institute B"
+    assert record["通讯作者"] == "Lin, XM; Zhou, Q"
+    assert record["通讯作者单位"] == "Institute A; Institute B"
 
 
 def test_scopus_uses_direct_address_for_an_unlinked_corresponding_author():

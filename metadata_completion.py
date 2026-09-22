@@ -224,6 +224,11 @@ def attach_explicit_address(record, candidate, address, source):
 
 
 def complete_wos_record(record, row):
+    resolved = record.pop("_wos_resolved_correspondence", None)
+    if resolved is not None:
+        for relation in resolved:
+            record = attach_explicit_address(record, relation["name"], "; ".join(relation["affiliations"]), "WOS Reprint Addresses")
+        return record
     raw = field(row, "Reprint Addresses", "RP", "通讯地址")
     markers = list(re.finditer(r"\((?:corresponding|reprint) author\)", raw, flags=re.I))
     # Multiple correspondence groups need their own parser, never flatten them.
