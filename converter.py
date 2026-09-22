@@ -866,7 +866,117 @@ def _author_bundles_equivalent(left, right):
     return _author_bundle_covers(left, right) and _author_bundle_covers(right, left)
 
 
+def _union_affiliation_match(left, right):
+    left_postal = set(re.findall(r"\b\d{5,6}\b", left))
+    right_postal = set(re.findall(r"\b\d{5,6}\b", right))
+    if left_postal and right_postal and left_postal != right_postal:
+        return False  # Preserve two explicitly different addresses.
+    if _affiliations_equivalent(left, right):
+        return True
+    # A bare institution is incomplete, not a contradictory address. This
+    # compatibility is used only with a unique detailed match for one author.
+    nber = {"nber", "nationalbureauofeconomicresearch", "natlbureconres"}
+    for bare, detailed in [(left, right), (right, left)]:
+        if "," in bare or "," not in detailed:
+            continue
+        bare_key = _affiliation_key(bare)
+        head_key = _affiliation_key(detailed.split(",", 1)[0])
+        if bare_key == head_key or (bare_key in nber and head_key in nber):
+            return True
+    return False
+
+
+def _affiliation_detail_score(unit):
+    profile = _institution_address_profile(unit)
+    return (len(profile[3]) if profile else 0,
+            bool(profile and profile[2]), bool(re.search(r"\b\d{5,6}\b", unit)),
+            unit.count(","), len(unit), unit.casefold())
+
+
+def _coalesce_author_units(units):
+    """Coalesce within ONE author only; do not borrow another author's dept."""
+    kept = []
+    for unit in sorted(_unique_values(units), key=_affiliation_detail_score, reverse=True):
+        matches = [other for other in kept if _union_affiliation_match(unit, other)]
+        profile = _institution_address_profile(unit)
+        matched_profiles = [_institution_address_profile(other) for other in matches]
+        redundant_parent = (len(matches) > 1 and profile and not profile[3]
+                            and all(p and (p[0], p[1], p[4]) == (profile[0], profile[1], profile[4])
+                                    for p in matched_profiles)
+                            and len({p[2] for p in matched_profiles if p[2]}) <= 1)
+        if redundant_parent:
+            continue  # All finer departments are already explicit for THIS author.
+        if len(matches) != 1:
+            # No match: an additional unit. Multiple matches: retain the bare
+            # text rather than picking an arbitrary campus or department.
+            kept.append(unit)
+    return kept
+
+
+def _union_author_bundles(left, right):
+    a, b = left.get("relations", []), right.get("relations", [])
+    if not a or len(a) != len(b):
+        return None
+    pairing = []
+    used = set()
+    for relation in a:
+        matches = [i for i, other in enumerate(b)
+                   if scopus_author_names_match(relation["name"], other["name"])]
+        if len(matches) != 1 or matches[0] in used:
+            return None
+        used.add(matches[0])
+        pairing.append(matches[0])
+    # Preserve the established preferred source's author order and display
+    # names, but rebuild affiliations and their indices from explicit links.
+    base, extra = (right, left) if _author_bundle_score(right) > _author_bundle_score(left) else (left, right)
+    if base is right:
+        pairing = [pairing.index(i) for i in range(len(b))]
+    relations = []
+    contributions = set()
+    for index, relation in enumerate(base["relations"]):
+        other = extra["relations"][pairing[index]]
+        units = _coalesce_author_units([*relation["affiliations"], *other["affiliations"]])
+        relations.append({"name": relation["name"], "affiliations": units})
+        for source, evidence in [(base, relation), (extra, other)]:
+            if any(unit in evidence["affiliations"] for unit in units):
+                contributions.update(split_semicolon_values(source.get("source", "")))
+    known = _unique_values(unit for relation in relations for unit in relation["affiliations"])
+    unlinked = []
+    for bundle in [base, extra]:
+        # The master list may also contain units with no author attachment.
+        linked_here = {unit for relation in bundle["relations"] for unit in relation["affiliations"]}
+        candidates = [*bundle.get("unlinked_affiliations", []),
+                      *(unit for unit in bundle.get("affiliations", []) if unit not in linked_here)]
+        for unit in candidates:
+            # Suppress only duplicates of already explicit evidence. Never
+            # use an unlinked department to enrich a named author's unit.
+            if _affiliation_key(unit) in {_affiliation_key(value) for value in known}:
+                continue
+            matches = [value for value in known if _union_affiliation_match(unit, value)]
+            if len(matches) == 1 and _affiliation_detail_score(matches[0]) >= _affiliation_detail_score(unit):
+                continue
+            unlinked.append(unit)
+            contributions.update(split_semicolon_values(bundle.get("source", "")))
+    # Prefer the original master-list ordering where exact chosen texts exist,
+    # which keeps stable indices for unchanged records.
+    order = _unique_values([*base.get("affiliations", []), *extra.get("affiliations", []), *known])
+    for relation in relations:
+        relation["affiliations"] = [unit for unit in order if unit in relation["affiliations"]]
+    result = _make_author_bundle(
+        relations, [unit for unit in order if unit in known],
+        "; ".join(sorted(contributions)) or base.get("source", ""),
+        evidence="同 DOI 按唯一作者对应合并明确单位；等价写法保留完整原文",
+        conflicts=[*left.get("conflicts", []), *right.get("conflicts", [])],
+        marker_space=base.get("marker_space", False),
+        unlinked_affiliations=unlinked,
+    )
+    return result
+
+
 def merge_author_bundles(existing_bundle, new_bundle):
+    combined = _union_author_bundles(existing_bundle, new_bundle)
+    if combined is not None:
+        return combined
     existing_signature = _author_bundle_signature(existing_bundle)
     new_signature = _author_bundle_signature(new_bundle)
     existing_covers_new = _author_bundle_covers(existing_bundle, new_bundle)
@@ -882,12 +992,11 @@ def merge_author_bundles(existing_bundle, new_bundle):
     ])
     if (
         (existing_signature or new_signature or unlinked_difference)
-        and existing_bundle.get("source") != new_bundle.get("source")
         and (existing_signature != new_signature or unlinked_difference)
         and not compatible
     ):
         conflict_messages.append(
-            f"跨来源作者—单位关系不一致或单位文本无法确认等价：{existing_bundle.get('source')} vs {new_bundle.get('source')}"
+            f"作者身份或未关联单位无法安全合并：{existing_bundle.get('source')} vs {new_bundle.get('source')}"
         )
     def selection_score(bundle):
         score = _author_bundle_score(bundle)
@@ -911,6 +1020,13 @@ def merge_author_bundles(existing_bundle, new_bundle):
         selected = new_bundle if selection_score(new_bundle) > selection_score(existing_bundle) else existing_bundle
     selected = dict(selected)
     selected["conflicts"] = _unique_values(conflict_messages)
+    selected_units = {_affiliation_key(unit) for unit in selected.get("affiliations", [])}
+    selected["unlinked_affiliations"] = _unique_values([
+        *selected.get("unlinked_affiliations", []),
+        *(unit for bundle in [existing_bundle, new_bundle]
+          for unit in [*bundle.get("affiliations", []), *bundle.get("unlinked_affiliations", [])]
+          if _affiliation_key(unit) not in selected_units),
+    ])
     return selected
 
 
@@ -1545,9 +1661,9 @@ def merge_document_types(existing_value, new_value) -> str:
 
 def merge_records(existing, new_data):
     # Author markers are only meaningful with the exact affiliation list that
-    # produced them.  Select one complete relationship bundle, then regenerate
-    # both columns from that bundle so source-local numbers can never leak into
-    # another source's unit list.
+    # produced them. Union explicit links by uniquely matched author identity,
+    # then regenerate both columns together; never reuse source-local numbers
+    # against the merged unit list.
     merged_author_bundle = merge_author_bundles(
         _author_bundle_from_record(existing),
         _author_bundle_from_record(new_data),
