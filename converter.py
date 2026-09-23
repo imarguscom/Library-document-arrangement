@@ -873,6 +873,8 @@ def _union_affiliation_match(left, right):
         return False  # Preserve two explicitly different addresses.
     if _affiliations_equivalent(left, right):
         return True
+    if _known_institution_hierarchy_match(left, right):
+        return True
     # A bare institution is incomplete, not a contradictory address. This
     # compatibility is used only with a unique detailed match for one author.
     nber = {"nber", "nationalbureauofeconomicresearch", "natlbureconres"}
@@ -882,6 +884,62 @@ def _union_affiliation_match(left, right):
         bare_key = _affiliation_key(bare)
         head_key = _affiliation_key(detailed.split(",", 1)[0])
         if bare_key == head_key or (bare_key in nber and head_key in nber):
+            return True
+    return False
+
+
+def _known_institution_hierarchy_match(left, right):
+    """Match only explicit school/parent spellings with the same location.
+
+    These narrow aliases describe institutions visible in the source strings;
+    city checks keep e.g. CUHK Hong Kong separate from CUHK Shenzhen. Unknown
+    schools still retain both source texts for review.
+    """
+    def normalized(value):
+        value = re.sub(r"\bcuhk\b", "chinese univ hong kong", value.casefold())
+        value = re.sub(r"\buniversity\b", "univ", value)
+        return " ".join(re.findall(r"[a-z0-9]+", value))
+
+    def has_location(value, city):
+        # First-segment "Chinese University of Hong Kong" does not itself
+        # establish the Hong Kong campus; check the address tail instead.
+        parts = [normalized(part) for part in value.split(",")]
+        return any(part == city or part.startswith(city + " ") for part in parts[-3:])
+
+    a, b = normalized(left), normalized(right)
+    families = [
+        ("ithaca", ("cornell", "johnson"), ("cornell", "johnson")),
+        ("shenzhen", ("chinese", "univ", "hong", "kong"),
+         ("chinese", "univ", "hong", "kong")),
+        ("hong kong", ("chinese", "univ", "hong", "kong"),
+         ("chinese", "univ", "hong", "kong")),
+        ("beijing", ("guanghua",), ("peking", "univ")),
+        ("hanover", ("tuck", "dartmouth"), ("dartmouth", "tuck")),
+        ("ann arbor", ("ross",), ("michigan", "ross")),
+        ("philadelphia", ("univ", "penn"), ("univ", "pennsylvania")),
+        ("new york", ("baruch",), ("cuny", "bernard", "baruch")),
+        ("cambridge", ("mit", "sloan"), ("mit", "sloan")),
+        ("austin", ("mccombs",), ("univ", "texas", "austin")),
+        ("durham", ("fuqua",), ("duke", "fuqua")),
+        ("london", ("london", "sch", "econ"),
+         ("london", "school", "economics", "political", "science")),
+    ]
+    # Each pattern is intentionally two-sided: at least one shared school or
+    # campus identifier is required, except for a known parent-school pair.
+    for city, short, full in families:
+        if not has_location(left, city) or not has_location(right, city):
+            continue
+        if city in {"hong kong", "shenzhen"}:
+            named = lambda text: ({label for label, pattern in
+                                   [("business", r"\bbusiness\b"),
+                                    ("economics", r"\b(?:dept|department)\s+econ\b"),
+                                    ("management-economics", r"\bmanagement\s+(?:and|&)\s+econ\b")]
+                                   if re.search(pattern, text.casefold())})
+            left_named, right_named = named(left), named(right)
+            if left_named and right_named and left_named.isdisjoint(right_named):
+                continue
+        if ((all(part in a for part in short) and all(part in b for part in full))
+                or (all(part in b for part in short) and all(part in a for part in full))):
             return True
     return False
 
@@ -913,6 +971,42 @@ def _coalesce_author_units(units):
     return kept
 
 
+def _author_unit_observations(bundle, index):
+    """Retain original record evidence; an accumulated union is not a source."""
+    observations = bundle.get("unit_observations")
+    if observations is not None:
+        return observations[index]
+    relation = bundle["relations"][index]
+    return [{"source": bundle.get("source", ""),
+             "affiliations": list(relation["affiliations"])}]
+
+
+def _distinct_author_unit_conflicts(name, observations):
+    conflicts = []
+    for index, left in enumerate(observations):
+        a = left["affiliations"]
+        if not a:
+            continue  # Missing evidence can be completed, not contradicted.
+        for right in observations[index + 1:]:
+            b = right["affiliations"]
+            if not b:
+                continue
+            left_only = [unit for unit in a
+                         if not any(_union_affiliation_match(unit, other) for other in b)]
+            right_only = [unit for unit in b
+                          if not any(_union_affiliation_match(unit, other) for other in a)]
+            # Equivalent sets or a subset are completeness cases (a/c).
+            # Both sides supplying different explicit units is correctness (b).
+            if left_only and right_only:
+                descriptions = sorted([
+                    f"{left['source']} [{'; '.join(sorted(left_only))}]",
+                    f"{right['source']} [{'; '.join(sorted(right_only))}]",
+                ])
+                conflicts.append(f"同一作者不同记录的明确单位不一致，已全部保留待复核：{name}；"
+                                 + " vs ".join(descriptions))
+    return _unique_values(conflicts)
+
+
 def _union_author_bundles(left, right):
     a, b = left.get("relations", []), right.get("relations", [])
     if not a or len(a) != len(b):
@@ -932,11 +1026,21 @@ def _union_author_bundles(left, right):
     if base is right:
         pairing = [pairing.index(i) for i in range(len(b))]
     relations = []
+    unit_observations = []
+    conflicts = [*left.get("conflicts", []), *right.get("conflicts", [])]
     contributions = set()
     for index, relation in enumerate(base["relations"]):
         other = extra["relations"][pairing[index]]
-        units = _coalesce_author_units([*relation["affiliations"], *other["affiliations"]])
+        observations = []
+        for observation in [*_author_unit_observations(base, index),
+                            *_author_unit_observations(extra, pairing[index])]:
+            if observation not in observations:
+                observations.append(observation)
+        unit_observations.append(observations)
+        units = _coalesce_author_units(unit for observation in observations
+                                       for unit in observation["affiliations"])
         relations.append({"name": relation["name"], "affiliations": units})
+        conflicts.extend(_distinct_author_unit_conflicts(relation["name"], observations))
         for source, evidence in [(base, relation), (extra, other)]:
             if any(unit in evidence["affiliations"] for unit in units):
                 contributions.update(split_semicolon_values(source.get("source", "")))
@@ -966,10 +1070,11 @@ def _union_author_bundles(left, right):
         relations, [unit for unit in order if unit in known],
         "; ".join(sorted(contributions)) or base.get("source", ""),
         evidence="同 DOI 按唯一作者对应合并明确单位；等价写法保留完整原文",
-        conflicts=[*left.get("conflicts", []), *right.get("conflicts", [])],
+        conflicts=conflicts,
         marker_space=base.get("marker_space", False),
         unlinked_affiliations=unlinked,
     )
+    result["unit_observations"] = unit_observations
     return result
 
 

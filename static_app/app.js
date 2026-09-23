@@ -1,5 +1,5 @@
 const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/";
-const APP_VERSION = "20260922-author-unit-union";
+const APP_VERSION = "20260923-distinct-affiliation-review";
 const MODULE_FILES = ["claim_mapping.py", "metadata_completion.py", "scope_rules.py", "converter.py"];
 
 const els = {
