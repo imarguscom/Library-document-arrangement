@@ -644,11 +644,11 @@ def test_author_unit_union_does_not_change_correspondence_conflict_review():
 
     assert merged["作者"] == "Alpha, Alice(1,2); Bravo, Bob(1,2)"
     assert merged["作者单位"] == "(1) Institute B; (2) Institute A"
-    assert merged["作者—单位关联冲突原因"] == ""
+    assert "同一作者不同记录的明确单位不一致" in merged["作者—单位关联冲突原因"]
     assert merged["通讯作者"] == "Bravo, Bob"
     assert merged["通讯作者单位"] == "Institute A"
     assert merged["通讯作者来源"] == "SCOPUS: Corresponding Author"
     assert merged["通讯作者单位来源"] == "SCOPUS: Authors with affiliations"
     assert "跨来源通讯作者—单位关系不一致" in merged["通讯作者—单位关联冲突原因"]
-    assert "作者—单位关联存在冲突" not in review.loc[0, "复核原因"].split("；")
+    assert "作者—单位关联存在冲突" in review.loc[0, "复核原因"].split("；")
     assert "通讯作者—单位关联存在冲突" in review.loc[0, "复核原因"]

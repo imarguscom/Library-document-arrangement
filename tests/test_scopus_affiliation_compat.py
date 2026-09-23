@@ -140,7 +140,7 @@ def test_original_pair_roundtrip_and_input_order(tmp_path, monkeypatch):
         sheets = pd.read_excel(dest, sheet_name=None, dtype=str)
         sheets = {k: v.fillna('') for k, v in sheets.items()}
         assert {k: len(sheets[k]) for k in ['全部数据', '期刊论文', '会议论文', '待复核_可尝试原文补全', '待复核_其他']} == {
-            '全部数据': 45, '期刊论文': 42, '会议论文': 3, '待复核_可尝试原文补全': 14, '待复核_其他': 0}
+            '全部数据': 45, '期刊论文': 42, '会议论文': 3, '待复核_可尝试原文补全': 15, '待复核_其他': 0}
         out = sheets['全部数据']
         assert out['DOI'].nunique() == 42 and out['DOI'].ne('').all()
         assert out['URL'].str.match(r'^https?://[^\s]+$').all()
@@ -148,7 +148,7 @@ def test_original_pair_roundtrip_and_input_order(tmp_path, monkeypatch):
         assert out['关键词'].ne('').sum() == 40
         assert out['页数'].ne('').sum() == 41
         for _, output_row in out.iterrows():
-            if output_row[c.AUTHOR_RELATION_CONFLICT_COLUMN]:
+            if '作者身份或未关联单位无法安全合并' in output_row[c.AUTHOR_RELATION_CONFLICT_COLUMN]:
                 continue  # Explicitly unresolved identity is not an asserted merge.
             restored = c._author_bundle_from_record(output_row)
             inputs_for_doi = [r for r in source_records if r['DOI'] == output_row['DOI']]
@@ -246,6 +246,7 @@ def test_complete_source_resolves_missing_links_without_using_position():
     merged = c.merge_author_bundles(conflicting, scopus)
     alpha = next(r for r in merged['relations'] if r['name'] == 'Alpha, Alice')
     assert set(alpha['affiliations']) == {'Institute A', 'Institute C'}
+    assert merged['conflicts']
     # An unmatched unlinked unit must not silently disappear either.
     unmatched = dict(wos, unlinked_affiliations=['Institute C'])
     merged = c.merge_author_bundles(unmatched, scopus)
@@ -378,3 +379,32 @@ def test_liu_input_pair_and_single_source_missing_evidence(tmp_path, monkeypatch
             assert set(out.loc[out['作者单位'].eq(''), 'DOI']) == missing_units
             assert out.loc[out['DOI'].isin(overlap), c.AUTHOR_RELATION_SOURCE_COLUMN].eq('SCOPUS').all()
             assert out.loc[~out['DOI'].isin(missing_units), '作者'].str.contains(r'\(\d').all()
+
+
+def test_four_available_inputs_keep_unique_dois_and_review_reasons(tmp_path, monkeypatch):
+    folder = os.environ.get('SCOPUS_PAIR_REGRESSION_DIR')
+    if not folder:
+        pytest.skip('Set SCOPUS_PAIR_REGRESSION_DIR to audit the four private inputs')
+    monkeypatch.setattr(s, 'DEFAULT_ALIAS_PATHS', [])
+    monkeypatch.setattr(s, 'discover_account_file', lambda *a, **k: None)
+    monkeypatch.setattr(s, 'discover_article_library', lambda *a, **k: None)
+    names = ['savedrecs.xlsx', 'scopus_frontend_7_熊伟.xlsx',
+             'wos_frontend_6_刘隽懿.xlsx', 'scopus_frontend_6_刘隽懿.xlsx']
+    dest = str(tmp_path / 'four_sources.xlsx')
+    c.run_conversion([str(Path(folder) / name) for name in names], dest, 'local')
+    sheets = {k: v.fillna('') for k, v in pd.read_excel(dest, sheet_name=None, dtype=str).items()}
+    out = sheets['全部数据']
+    review = sheets['待复核_可尝试原文补全']
+    assert len(out) == 61
+    assert len(sheets['期刊论文']) == 47
+    assert len(sheets['会议论文']) == 14
+    assert len(review) == 31
+    assert len(sheets['待复核_其他']) == 0
+    assert out['DOI'].nunique() == 58  # Three article/conference pairs stay separate.
+    assert out['URL'].str.match(r'^https?://[^\s]+$').all()
+    distinct = out.loc[out['DOI'] == '10.1016/j.jfineco.2021.06.010'].iloc[0]
+    assert 'Princeton University' in distinct['作者单位']
+    assert 'Chinese Univ Hong Kong' in distinct['作者单位']
+    assert '同一作者不同记录的明确单位不一致' in distinct[c.AUTHOR_RELATION_CONFLICT_COLUMN]
+    assert '作者—单位关联存在冲突' in review.loc[
+        review['DOI'] == distinct['DOI'], '复核原因'].iloc[0].split('；')
